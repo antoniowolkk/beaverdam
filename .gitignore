@@ -1,0 +1,9 @@
+.DS_Store
+node_modules/
+.pgdata/
+.env
+.env.*
+!.env.example
+
+# Private: names clients. Stays local, never committed.
+Beaverdam PRD.pdf
