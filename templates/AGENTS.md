@@ -81,7 +81,7 @@ A change is not done until lint, type check, the full test suite, and the secret
 
 ## 5. The security spine — non-negotiable
 
-Every backend gets all seven, from the first endpoint. Not "later", not "before launch". The detail for each lives in `.beaverdam/skills/`; the stack-specific code lives in the recipe.
+Every backend gets all eight, from the first endpoint. Not "later", not "before launch". The detail for each lives in `.beaverdam/skills/`; the stack-specific code lives in the recipe.
 
 **1. Auth** — `skills/auth-spine.md`
 - One pattern per project, chosen from the approved list: **session cookie + CSRF protection**, or **short-lived access token + refresh token**. Record the choice in an ADR.
@@ -140,7 +140,13 @@ Every backend gets all seven, from the first endpoint. Not "later", not "before 
 - The client gets a safe message and the request id. Never a stack trace, SQL, internal path, or library error text.
 - One error handler, in one place.
 
-**Backend-shape extras** — applied on top of the seven, based on section 1:
+**8. Observability** — `skills/observability.md`
+- Every live route, webhook, socket, and job is a row in the entry-point table of `docs/threat-model.md`, and a test fails when the code and the table disagree.
+- Denials, 401/403/429, failed logins, audit-write failures, and 5xx are countable per route from the log fields above. Every request logs its duration.
+- A liveness and a readiness check, public and rate limited, returning a status only: no version, environment, or error detail.
+- What would alert, and on what threshold, is written in `docs/threat-model.md`. Wiring alerts or log shipping to an outside service needs an ADR.
+
+**Backend-shape extras** — applied on top of the eight, based on section 1:
 - **Transactional:** idempotency keys on every write that moves money or stock; database transactions around multi-step writes; outbox pattern for side effects (emails, webhooks) that must not double-fire.
 - **Analytics / reporting:** read replica or cache for heavy reads; exports are rate limited and audit logged.
 - **Real-time:** authenticate the socket connection, re-check authorization per channel or room, rate limit messages.
@@ -188,6 +194,7 @@ Every backend gets all seven, from the first endpoint. Not "later", not "before 
 - [ ] No public endpoint without a rate limit
 - [ ] No secret, token, or personal data in code, logs, fixtures, or responses
 - [ ] No empty catch, no stack trace or internal detail reaching the client
+- [ ] No entry point missing from the inventory in `docs/threat-model.md`; the inventory test passes
 
 Rules:
 - If you cannot describe how a task would be verified, it is not ready to implement. Ask instead.
@@ -195,7 +202,7 @@ Rules:
 - Never delete or skip a test to get to green, least of all an unauthorized or forbidden-path test.
 - Do not claim something works unless you ran it and saw it pass. Paste the real output.
 
-**Prototype mode** is allowed only for throwaway spikes and only when the human says so explicitly, in this session. In prototype mode you may skip rate limiting, full RBAC, and the audit log. You may **not** skip secrets handling or auth on anything reachable from outside localhost. Mark prototype code with a `PROTOTYPE:` comment at the top of each file. Prototype code never merges to the main branch without the full spine added and tested.
+**Prototype mode** is allowed only for throwaway spikes and only when the human says so explicitly, in this session. In prototype mode you may skip rate limiting, full RBAC, the audit log, and observability beyond the health checks and the endpoint inventory. You may **not** skip secrets handling or auth on anything reachable from outside localhost. Mark prototype code with a `PROTOTYPE:` comment at the top of each file. Prototype code never merges to the main branch without the full spine added and tested.
 
 ## 6b. Which skill, which recipe
 
@@ -211,6 +218,7 @@ The skills are plain markdown. Nothing loads automatically. Read the one the tas
 | New state-changing endpoint, or any logging | `skills/audit-log.md` |
 | New endpoint, webhook, upload, or query | `skills/input-validation.md` |
 | New public or expensive endpoint | `skills/rate-limit.md` |
+| New or removed route, health check, alerting, or "how would we know?" | `skills/observability.md` |
 | A key leaked, an account looks compromised, suspicious log entries | `skills/incident-checklist.md` — stop building and tell the human first |
 
 Always read the matching section of `.beaverdam/recipes/<stack>.md` alongside the skill.

@@ -56,6 +56,23 @@ try {
   };
   for (const [name, sql] of Object.entries(spine)) { const r = await pool.query(sql); ok(r.rowCount === 0, "spine: " + name, r.rows.map(Object.values).join(", ")); }
 
+  // --- endpoint inventory (recipe section 15): what the API roles can reach == the threat model's entry points ---
+  const inventory = `
+    select 'rpc public.' || p.proname as entry from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and (has_function_privilege('anon', p.oid, 'execute') or has_function_privilege('authenticated', p.oid, 'execute'))
+    union all
+    select 'table public.' || c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind in ('r','p','v','m')
+      and (has_any_column_privilege('anon', c.oid, 'select,insert,update') or has_table_privilege('anon', c.oid, 'delete')
+        or has_any_column_privilege('authenticated', c.oid, 'select,insert,update') or has_table_privilege('authenticated', c.oid, 'delete'))
+    order by 1`;
+  const live = (await pool.query(inventory)).rows.map((row) => row.entry).sort();
+  const doc = (await readFile("docs/threat-model.md", "utf8")).split(/^## Entry points$/m)[1]?.split(/^## /m)[0] ?? "";
+  const listed = [...doc.matchAll(/^\| `([^`]+)` \|/gm)].map((m) => m[1]).sort();
+  ok(JSON.stringify(live) === JSON.stringify(listed), "inventory: API-reachable objects match docs/threat-model.md",
+    `unlisted: ${live.filter((e) => !listed.includes(e)).join(", ") || "none"}; stale: ${listed.filter((e) => !live.includes(e)).join(", ") || "none"}`);
+
   // --- RLS reads ---
   let r = await as(uMember, q("select id from public.invoices"));
   ok(r.out?.rows.length === 1 && r.out.rows[0].id === invA, "member sees only own org's invoices");
@@ -144,6 +161,14 @@ try {
   ok(r.out?.rows[0].ok === false, "unknown quota bucket denies");
   r = await as(null, q("select public.take_quota('export')"), { role: "anon" });
   ok(r.err?.code === "42501", "anon cannot take quota", r.err?.code);
+
+  // --- security signals are countable from the audit log (recipe section 15) ---
+  const signals = await pool.query(`
+    select action, count(*)::int as denied from private.audit_log
+    where result = 'denied' and timestamp > now() - interval '1 hour'
+    group by action order by action`);
+  ok(signals.rows.some((row) => row.action === "invoice.delete" && row.denied >= 1), "signals: denials countable per action from the audit log",
+    signals.rows.map((row) => `${row.action}=${row.denied}`).join(", "));
 } catch (e) {
   fail++; console.log("CRASH", e);
 } finally {

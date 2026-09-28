@@ -6,7 +6,7 @@
 
 ## 1. What this repo is
 
-- **Product:** beaverdam, a plain-markdown rule set that makes an AI agent build every backend with the same security spine: auth, secrets, RBAC, input validation, rate limiting, audit logging, error handling.
+- **Product:** beaverdam, a plain-markdown rule set that makes an AI agent build every backend with the same security spine: auth, secrets, RBAC, input validation, rate limiting, audit logging, error handling, observability.
 - **Owner:** Antonio Wolkk (antoniowolkk). MIT licensed, headed for a public GitHub repo.
 - **Business outcome:** every backend Antonio starts, for Wolkk clients, Ombak, or personal projects, has the spine by default, without asking for each piece and without improvising it per project.
 - **Definition of success:** zero secrets in git or logs across beaverdam projects; at least one real client project on a beaverdam recipe; faster scaffolding of a secure baseline.
@@ -152,7 +152,7 @@ Do not reopen these without a reason from a real project.
 1. **Tool-agnostic, plain markdown.** No SKILL.md frontmatter or plugin format. Trade-off accepted: no auto-loading by keyword; `templates/AGENTS.md` section 6b routes tasks to skills instead. (PRD, Repo structure.)
 2. **Separate repo from junior-agent.** One pack, one job. Projects using both use beaverdam's template, which keeps junior-agent's section numbers.
 3. **Auth: a short approved list**, not one pattern: session cookie + CSRF, or short-lived access token + refresh. Anything else needs an ADR. (Resolves a PRD open question.)
-4. **Prototype mode exists, explicit opt-in only.** It may skip rate limiting, full RBAC, and the audit log. It never skips secrets handling or auth on anything reachable from outside localhost. (Resolves a PRD open question.)
+4. **Prototype mode exists, explicit opt-in only.** It may skip rate limiting, full RBAC, the audit log, and observability beyond health checks and the endpoint inventory. It never skips secrets handling or auth on anything reachable from outside localhost. (Resolves a PRD open question.)
 5. **Projects install skills and recipes into `.beaverdam/`**, a tool-neutral folder.
 6. **Template lives in `templates/`**, so the repo root `AGENTS.md` can be this maintainer file.
 7. **Recipes are proven by examples**, not by review. `examples/` holds the proof, and the recipe says what is unproven.

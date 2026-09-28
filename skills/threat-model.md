@@ -13,7 +13,7 @@ Keep it to one page. A threat model nobody rereads protects nothing.
    - **Sensitive** — credentials, payment data, health, contracts, anything a client would call confidential.
    - **Internal** — neither.
 2. **List the callers.** Who or what can send a request: anonymous internet, signed-in users by role, admins, other services, webhooks from third parties, AI agents acting on a user's behalf.
-3. **List the entry points.** Every route, webhook, socket, scheduled job, and file upload. For each: which callers can reach it, and what data it reads or writes.
+3. **List the entry points.** Every route, webhook, socket, scheduled job, and file upload. For each: which callers can reach it, and what data it reads or writes. This table is also the endpoint inventory, checked against the live code by a test (`observability.md`).
 4. **Mark the trust boundaries.** Where data crosses from something you do not control into something you do: client → API, third party → webhook, user upload → storage, API → external service.
 5. **Ask four questions per entry point.** Keep only the ones with a real answer.
    - Can someone reach this who should not? (auth, RBAC)
@@ -46,13 +46,19 @@ Last updated: <date> · Backend shape: <from AGENTS.md section 1>
 ## Top risks
 | # | Risk | Entry point | Worst case | Closed by |
 
+## Alerts
+| Alert | Signal | Threshold | Wired to |
+
+## Resilience drills
+| Drill | Last run | Result |
+
 ## Open questions for the human
 - <anything not closed by the spine>
 ```
 
 ## While building
 
-- Before writing an endpoint, find its row in the entry-point table. If it is missing, add it.
+- Before writing an endpoint, find its row in the entry-point table. If it is missing, add it. The inventory test fails until you do.
 - If a change adds a caller, a data type, or a trust boundary, update the file in the same change.
 - In the final report for any feature, say which top risks it touched and whether each is still closed.
 

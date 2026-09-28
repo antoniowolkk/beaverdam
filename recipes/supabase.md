@@ -8,7 +8,7 @@ Installing anything, linking a remote project, `supabase db push`, `supabase fun
 
 ## What is proven, and what is not
 
-The complete migration in this recipe is `examples/supabase-sql-check/migration.sql`. The SQL excerpts below are copied from it. It was run against real Postgres 18.4 with a stub for Supabase's roles and `auth` schema (`supabase-stub.sql`), and passes 42 checks: RLS isolation, column grants, constraints, audit rows, denial audits that survive commit, role-change rules, the rate limiter, the quota RPC, and the section 13 spine queries. Four deliberate breakages (default grants left on, `raise` instead of `return`, unpinned `search_path`, `using (true)`) were each caught.
+The complete migration in this recipe is `examples/supabase-sql-check/migration.sql`. The SQL excerpts below are copied from it. It was run against real Postgres 18.4 with a stub for Supabase's roles and `auth` schema (`supabase-stub.sql`), and passes 44 checks: RLS isolation, column grants, constraints, audit rows, denial audits that survive commit, role-change rules, the rate limiter, the quota RPC, the section 13 spine queries, and the section 15 inventory and signal queries. Four deliberate breakages (default grants left on, `raise` instead of `return`, unpinned `search_path`, `using (true)`) were each caught.
 
 Not proven here, because the Supabase CLI needs Docker and none was available: PostgREST behaviour (the pre-request hook registration, error responses, `request.*` settings as PostgREST sets them), Supabase Auth settings, Edge Functions, Storage policies, Realtime, pgTAP via `supabase test db`, and `supabase db lint`. Those sections are written from the Supabase and PostgREST docs and are marked **unproven**. Prove them on the first real project and update this line.
 
@@ -623,7 +623,7 @@ create policy invoice_files_upload on storage.objects
 
 ## 13. Tests
 
-**Without Docker:** `examples/supabase-sql-check/` runs the migration on a throwaway Postgres with a stub of Supabase's roles and `auth.uid()`, then runs 42 checks as `anon` and `authenticated`, the way PostgREST would. Copy its structure for a project's own migration.
+**Without Docker:** `examples/supabase-sql-check/` runs the migration on a throwaway Postgres with a stub of Supabase's roles and `auth.uid()`, then runs 44 checks as `anon` and `authenticated`, the way PostgREST would. Copy its structure for a project's own migration.
 
 **In a project,** pgTAP under `supabase/tests/`, run with `supabase test db` (**unproven here**). Act as a user by setting the role and claims inside the test transaction:
 
@@ -712,6 +712,37 @@ The pre-merge checklist in `AGENTS.md` section 6, for this stack:
 - [ ] No authorization on `user_metadata`.
 - [ ] The secret-key grep from section 1 prints nothing. Secret scan passes.
 - [ ] Every new Edge Function verifies the caller (or the webhook signature), validates with zod, takes a quota if expensive, and replies through `reply()`.
+- [ ] The inventory query from section 15 matches the entry-point table in `docs/threat-model.md`.
+
+## 15. Observability → `skills/observability.md`
+
+**Endpoint inventory.** With no route layer, the entry points are whatever the API roles can reach in the exposed schema: tables and views they hold any privilege on, and functions they can execute. This query lists them in the same form as the first column of the threat model's entry-point table (`rpc public.delete_invoice`, `table public.invoices`). The harness compares the two and fails on an unlisted object and on a stale row; both were broken once and caught.
+
+```sql
+select 'rpc public.' || p.proname as entry from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public'
+  and (has_function_privilege('anon', p.oid, 'execute') or has_function_privilege('authenticated', p.oid, 'execute'))
+union all
+select 'table public.' || c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public' and c.relkind in ('r','p','v','m')
+  and (has_any_column_privilege('anon', c.oid, 'select,insert,update') or has_table_privilege('anon', c.oid, 'delete')
+    or has_any_column_privilege('authenticated', c.oid, 'select,insert,update') or has_table_privilege('authenticated', c.oid, 'delete'))
+order by 1;
+```
+
+`has_any_column_privilege`, not `has_table_privilege`: tables here use column-level grants (section 3), which `has_table_privilege` does not see. The query assumes `public` is the only exposed schema; add a branch for each other schema the project exposes. Edge Functions, Storage buckets, and Realtime channels are entry points too and need their own rows, listed by hand (**unproven**: nothing here enumerates them).
+
+**Signals.** Denials are countable per action straight from the audit table. The harness runs this and sees the denials its own tests caused.
+
+```sql
+select action, count(*)::int as denied from private.audit_log
+where result = 'denied' and timestamp > now() - interval '1 hour'
+group by action order by action;
+```
+
+Run it from a scheduled job or the SQL editor as the owner, never through the API: `private` is not exposed.
+
+**Health, duration, alerts (unproven).** Supabase runs the database, so there is no readiness check to write in SQL. If the project has Edge Functions, a `health` function returns `{ "status": "ok" }` only, through `reply()`. Request durations and 4xx/5xx counts are not in the audit table; they have to come from whatever request and database logs the Supabase project provides. None of that was checked here: look at what the project's plan offers, and write what you found into the threat model's alert table. Sending alerts outside Supabase is an outbound integration and needs an ADR.
 
 ## When this recipe is out of date
 

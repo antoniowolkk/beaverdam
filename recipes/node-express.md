@@ -4,7 +4,7 @@ How each part of the spine in `AGENTS.md` section 5 looks in a Node/Express back
 
 Code is TypeScript, ESM, Express 5. Where a pattern depends on which auth pattern the project's ADR picked, both are shown: keep one, delete the other.
 
-Installing any package below needs a yes first (`AGENTS.md` section 7). The versions below are the ones pattern A was last proven against in `examples/node-express-demo/` (type check + 16 integration tests on real Postgres, 2026-09-24). Pattern B (section 6) and the Redis store type-check but have not been run end to end. If a major has moved since, check the changelog for the APIs used here before copying code.
+Installing any package below needs a yes first (`AGENTS.md` section 7). The versions below are the ones pattern A was last proven against in `examples/node-express-demo/` (type check + 21 integration tests on real Postgres, first 2026-09-24, last 2026-09-28). Pattern B (section 6) and the Redis store type-check but have not been run end to end. If a major has moved since, check the changelog for the APIs used here before copying code.
 
 ## Stack
 
@@ -45,13 +45,15 @@ src/
     tokens.ts            pattern B: issue/verify access, rotate refresh, authenticate
     permissions.ts       ROLES, PERMISSIONS, can()
     secure-route.ts      secureRoute(): the only way to register a route
+    inventory.ts         mount(), routeInventory(): the live route list
     audit.ts             ACTIONS, audit(), audited()
     limits.ts            LIMITS config + limiter factory
-  routes/                one file per resource, thin
+  routes/                one file per resource, thin; health.ts for liveness and readiness
   services/              business logic, takes Actor + validated data, never req
   schemas/               zod schemas per resource
 migrations/
 tests/
+docs/threat-model.md     its entry-point table is the endpoint inventory (section 15)
 ```
 
 ## Commands for `AGENTS.md` section 4
@@ -994,6 +996,8 @@ import { errorHandler, notFound } from "./security/errors.js";
 import { sessions, checkOrigin } from "./security/session.js"; // pattern A
 import { auth } from "./routes/auth.js";
 import { invoices } from "./routes/invoices.js";
+import { health } from "./routes/health.js";
+import { mount } from "./security/inventory.js";
 
 export const app = express();
 
@@ -1007,8 +1011,9 @@ app.use(express.json({ limit: "100kb" }));    // 4. bounded body parsing
 app.use(sessions);                            // 5. pattern A only
 app.use(checkOrigin);                         // 6. pattern A only; pattern B: cors({ origin: config.ALLOWED_ORIGINS })
 
-app.use("/auth", auth);                       // 7. routes, all registered via secureRoute()
-app.use("/invoices", invoices);
+mount(app, "/health", health);                // 7. routes, all registered via secureRoute(), all mounted via mount()
+mount(app, "/auth", auth);
+mount(app, "/invoices", invoices);
 
 app.use(notFound);                            // 8. unknown routes → 404 via the error handler
 app.use(errorHandler);                        // 9. last
@@ -1209,7 +1214,139 @@ grep -rnE "catch[[:space:]]*(\([^)]*\))?[[:space:]]*\{[[:space:]]*\}" src
 
 Empty catch blocks.
 
-Plus: type check passes (enforces `audited()` on write routes), full test suite passes, secret scan passes.
+```bash
+grep -rnE "app\.use\([[:space:]]*['\"]/" src
+```
+
+Routers mounted with `app.use` instead of `mount()`. The inventory test also throws on these.
+
+Plus: type check passes (enforces `audited()` on write routes), full test suite passes (includes the inventory test, section 15), secret scan passes.
+
+## 15. Observability → `skills/observability.md`
+
+**Endpoint inventory.** Express 5 does not expose the prefix a router is mounted under, so routers are mounted through `mount()`, which records it. `routeInventory()` then reads every route from Express's own route stack, not from `secureRoute()`, so a route registered some other way still shows up.
+
+```ts
+// src/security/inventory.ts
+import type { Express, Router } from "express";
+
+// Express 5 does not expose a mounted router's prefix, so mount() records it.
+const prefixes = new Map<unknown, string>();
+
+export function mount(app: Express, prefix: string, router: Router) {
+  prefixes.set(router, prefix);
+  app.use(prefix, router);
+}
+
+type Layer = { route?: { path: string; methods: Record<string, boolean> }; name?: string; handle: unknown };
+
+// Every live route, read from Express itself, so a route that skipped secureRoute() still shows up.
+// Same format as routeOf() and the audit log's source.route ("DELETE /invoices/:id"),
+// minus the trailing slash on a router's root route ("POST /invoices", not "POST /invoices/").
+export function routeInventory(app: Express): string[] {
+  const out: string[] = [];
+  const walk = (stack: Layer[], prefix: string) => {
+    for (const layer of stack) {
+      if (layer.route) {
+        const path = prefix && layer.route.path === "/" ? prefix : prefix + layer.route.path;
+        for (const m of Object.keys(layer.route.methods)) out.push(`${m.toUpperCase()} ${path}`);
+      } else if (layer.name === "router") {
+        const p = prefixes.get(layer.handle);
+        if (p === undefined) throw new Error("router mounted without mount(); its routes cannot be inventoried");
+        walk((layer.handle as { stack: Layer[] }).stack, prefix + p);
+      }
+    }
+  };
+  walk((app as unknown as { router: { stack: Layer[] } }).router.stack, "");
+  return out.sort();
+}
+```
+
+The test compares that list with the first column of the "Entry points" table in `docs/threat-model.md`. It fails on a live route missing from the table, a listed route that is gone, and a router mounted without `mount()`. Each of those was broken once in the demo and the test failed.
+
+**Health checks.** Registered through `secureRoute()` like everything else, so they are rate limited.
+
+```ts
+// src/routes/health.ts
+import { Router } from "express";
+import { secureRoute } from "../security/secure-route.js";
+import { pool } from "../db.js";
+
+export const health = Router();
+
+// Public and rate limited like any other route. Bodies carry a status only:
+// no version, environment, hostname, or dependency detail.
+secureRoute(health, "get", "/live", { public: true }, (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+secureRoute(health, "get", "/ready", { public: true }, async (req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ status: "ok" });
+  } catch (err) {
+    req.log.warn({ kind: "app", err }, "readiness check failed"); // detail to the log, never the body
+    res.status(503).json({ status: "unavailable" });
+  }
+});
+```
+
+**Duration.** `pino-http` already writes `responseTime` (milliseconds) on every completed-request line, next to `req.method`, `req.path`, and `res.status` from `logger.ts` (section 2). That is the duration signal; do not add a second timer. Checked in the `pino-http` 11.0 source, not asserted by a test.
+
+**Signals and alerts.** Denials, 429s, failed logins, and 5xx come from fields already on the log lines: `result` on audit entries, `res.status` on request lines, and `kind: security` on rate-limit hits. Counting them and sending alerts is the job of whatever collects stdout on the host. Wiring that is an outbound integration and needs an ADR (**unproven**: the demo has no collector).
+
+```ts
+// tests/observability.test.ts
+import { describe, it, expect, afterAll, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import request from "supertest";
+import { app } from "../src/app.js";
+import { pool } from "../src/db.js";
+import { routeInventory } from "../src/security/inventory.js";
+import { owner } from "./helpers.js";
+
+afterAll(async () => {
+  await pool.end();
+  await owner.end();
+});
+
+// First column of the "Entry points" table in docs/threat-model.md, e.g. `DELETE /invoices/:id`.
+async function documentedEntryPoints() {
+  const doc = await readFile("docs/threat-model.md", "utf8");
+  const section = doc.split(/^## Entry points$/m)[1]?.split(/^## /m)[0] ?? "";
+  return [...section.matchAll(/^\| `([^`]+)` \|/gm)].map((m) => m[1]).sort();
+}
+
+describe("endpoint inventory", () => {
+  it("every live route is in the threat model, and every listed route is live", async () => {
+    expect(routeInventory(app)).toEqual(await documentedEntryPoints());
+  });
+});
+
+describe("health", () => {
+  it("live: 200 with a status only", async () => {
+    const res = await request(app).get("/health/live").expect(200);
+    expect(res.body).toEqual({ status: "ok" });
+  });
+
+  it("ready: 200 with a status only when the database answers", async () => {
+    const res = await request(app).get("/health/ready").expect(200);
+    expect(res.body).toEqual({ status: "ok" });
+  });
+
+  it("ready: 503 and no error detail when the database is down", async () => {
+    const spy = vi.spyOn(pool, "query").mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:5432"));
+    const res = await request(app).get("/health/ready").expect(503);
+    spy.mockRestore();
+    expect(res.body).toEqual({ status: "unavailable" });
+  });
+
+  it("health checks are rate limited like any public route", async () => {
+    const res = await request(app).get("/health/live").expect(200);
+    expect(res.headers["ratelimit-policy"]).toBeDefined();
+  });
+});
+```
 
 ## When this recipe is out of date
 
