@@ -18,8 +18,8 @@ try {
   ok(true, "migration applies cleanly on Postgres " + (await pool.query("show server_version")).rows[0].server_version);
 
   // Run fn as an API caller, like PostgREST does: set claims + role inside a transaction.
-  async function as(sub, fn, { role = "authenticated", method = "POST" } = {}) {
-    const c = await pool.connect();
+  async function as(sub, fn, { role = "authenticated", method = "POST", via = pool } = {}) {
+    const c = await via.connect();
     try {
       await c.query("begin");
       await c.query("select set_config('request.jwt.claims', $1, true), set_config('request.method', $2, true), set_config('request.path', '/rest/v1/rpc', true), set_config('request.headers', $3, true)",
@@ -55,6 +55,23 @@ try {
     "API roles cannot touch private tables": `select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'private' and c.relkind = 'r' and (has_table_privilege('authenticated', c.oid, 'select,insert,update,delete') or has_table_privilege('anon', c.oid, 'select,insert,update,delete'))`,
   };
   for (const [name, sql] of Object.entries(spine)) { const r = await pool.query(sql); ok(r.rowCount === 0, "spine: " + name, r.rows.map(Object.values).join(", ")); }
+
+  // --- endpoint inventory (recipe section 15): what the API roles can reach == the threat model's entry points ---
+  const inventory = `
+    select 'rpc public.' || p.proname as entry from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and (has_function_privilege('anon', p.oid, 'execute') or has_function_privilege('authenticated', p.oid, 'execute'))
+    union all
+    select 'table public.' || c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind in ('r','p','v','m')
+      and (has_any_column_privilege('anon', c.oid, 'select,insert,update') or has_table_privilege('anon', c.oid, 'delete')
+        or has_any_column_privilege('authenticated', c.oid, 'select,insert,update') or has_table_privilege('authenticated', c.oid, 'delete'))
+    order by 1`;
+  const live = (await pool.query(inventory)).rows.map((row) => row.entry).sort();
+  const doc = (await readFile("docs/threat-model.md", "utf8")).split(/^## Entry points$/m)[1]?.split(/^## /m)[0] ?? "";
+  const listed = [...doc.matchAll(/^\| `([^`]+)` \|/gm)].map((m) => m[1]).sort();
+  ok(JSON.stringify(live) === JSON.stringify(listed), "inventory: API-reachable objects match docs/threat-model.md",
+    `unlisted: ${live.filter((e) => !listed.includes(e)).join(", ") || "none"}; stale: ${listed.filter((e) => !live.includes(e)).join(", ") || "none"}`);
 
   // --- RLS reads ---
   let r = await as(uMember, q("select id from public.invoices"));
@@ -144,6 +161,53 @@ try {
   ok(r.out?.rows[0].ok === false, "unknown quota bucket denies");
   r = await as(null, q("select public.take_quota('export')"), { role: "anon" });
   ok(r.err?.code === "42501", "anon cannot take quota", r.err?.code);
+
+  // --- concurrency (recipe section 12): 20 simultaneous takes on separate connections, still exactly 10 succeed ---
+  const wide = new pg.Pool({ connectionString: `postgres://postgres:postgres@localhost:${PORT}/supa`, max: 20 });
+  const burst = await Promise.all(Array.from({ length: 20 }, () => as(uOther, q("select public.take_quota('export') as ok"), { via: wide })));
+  await wide.end();
+  const granted = burst.filter((b) => b.out?.rows[0].ok === true).length;
+  ok(granted === 10 && burst.every((b) => !b.err), "concurrent take_quota: exactly 10 of 20 parallel calls succeed (no check-then-write race)", `granted ${granted}`);
+
+  // --- concurrency: two owners demoting each other at once must leave one owner (recipe section 8) ---
+  const wide2 = new pg.Pool({ connectionString: `postgres://postgres:postgres@localhost:${PORT}/supa`, max: 20 });
+  let orphaned = 0, bothWon = 0;
+  for (let i = 0; i < 20; i++) {
+    const [o1, o2] = [randomUUID(), randomUUID()];
+    for (const u of [o1, o2]) await pool.query("insert into auth.users (id, email) values ($1, $2)", [u, u + "@example.test"]);
+    const org = (await pool.query("insert into public.orgs (name) values ('race') returning id")).rows[0].id;
+    await pool.query("insert into public.memberships values ($1,$3,'owner'),($2,$3,'owner')", [o1, o2, org]);
+    const res = await Promise.all([
+      as(o1, q("select public.change_member_role($1,$2,'member') as ok", [org, o2]), { via: wide2 }),
+      as(o2, q("select public.change_member_role($1,$2,'member') as ok", [org, o1]), { via: wide2 }),
+    ]);
+    if (res.every((x) => x.out?.rows[0].ok === true)) bothWon++;
+    if ((await pool.query("select 1 from public.memberships where org_id = $1 and role = 'owner'", [org])).rowCount === 0) orphaned++;
+  }
+  ok(orphaned === 0 && bothWon === 0, "concurrent mutual owner demotion: every org keeps an owner (20 parallel pairs)", `orphaned ${orphaned}, both succeeded ${bothWon}`);
+
+  // --- concurrency: the same invoice deleted twice at once succeeds once (recipe section 8) ---
+  const invRace = (await pool.query("insert into public.invoices (org_id, customer_id, amount_cents, currency, created_by) values ($1, gen_random_uuid(), 1000, 'EUR', $2) returning id", [orgA, uAdmin])).rows[0].id;
+  const dels = await Promise.all([0, 1].map(() => as(uAdmin, q("select public.delete_invoice($1) as ok", [invRace]), { via: wide2 })));
+  await wide2.end();
+  const wins = dels.filter((d) => d.out?.rows[0].ok === true).length;
+  const delAudit = (await pool.query("select result from private.audit_log where action = 'invoice.delete' and resource_id = $1 order by result", [invRace])).rows.map((row) => row.result);
+  ok(wins === 1 && JSON.stringify(delAudit) === JSON.stringify(["denied", "success"]), "concurrent double delete: one true, one audited false", `true ${wins}×, audit ${delAudit.join(",")}`);
+
+  // --- the pre-request hook runs for anon, not only authenticated (recipe section 6) ---
+  r = await as(null, q("select private.check_request()"), { role: "anon" });
+  ok(!r.err, "pre-request hook is callable as anon", r.err?.message);
+  const anonPrivate = (await pool.query(`select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'private' and has_function_privilege('anon', p.oid, 'execute') order by 1`)).rows.map((row) => row.proname);
+  ok(JSON.stringify(anonPrivate) === JSON.stringify(["check_request"]), "anon can execute only the hook in private", anonPrivate.join(", "));
+
+  // --- security signals are countable from the audit log (recipe section 15) ---
+  const signals = await pool.query(`
+    select action, count(*)::int as denied from private.audit_log
+    where result = 'denied' and timestamp > now() - interval '1 hour'
+    group by action order by action`);
+  ok(signals.rows.some((row) => row.action === "invoice.delete" && row.denied >= 1), "signals: denials countable per action from the audit log",
+    signals.rows.map((row) => `${row.action}=${row.denied}`).join(", "));
 } catch (e) {
   fail++; console.log("CRASH", e);
 } finally {

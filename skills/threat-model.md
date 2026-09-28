@@ -13,13 +13,14 @@ Keep it to one page. A threat model nobody rereads protects nothing.
    - **Sensitive** — credentials, payment data, health, contracts, anything a client would call confidential.
    - **Internal** — neither.
 2. **List the callers.** Who or what can send a request: anonymous internet, signed-in users by role, admins, other services, webhooks from third parties, AI agents acting on a user's behalf.
-3. **List the entry points.** Every route, webhook, socket, scheduled job, and file upload. For each: which callers can reach it, and what data it reads or writes.
+3. **List the entry points.** Every route, webhook, socket, scheduled job, and file upload. For each: which callers can reach it, and what data it reads or writes. This table is also the endpoint inventory, checked against the live code by a test (`observability.md`).
 4. **Mark the trust boundaries.** Where data crosses from something you do not control into something you do: client → API, third party → webhook, user upload → storage, API → external service.
 5. **Ask four questions per entry point.** Keep only the ones with a real answer.
    - Can someone reach this who should not? (auth, RBAC)
    - Can someone reach data that is not theirs? (ownership, IDOR)
    - Can someone send input that does something unintended? (validation, injection, mass assignment)
    - Can someone overwhelm or abuse it? (rate limit, cost)
+   - What if two of these arrive at once? (check-then-write races, double spend, overbooking — `backend-shape.md`)
 6. **Name the worst case.** For each sensitive data type: if it leaked tomorrow, what happens, and to whom.
 7. **Map each risk to the spine.** Every risk points at the skill that closes it. A risk with no skill to point at goes to the human as an open question.
 8. **Write `docs/threat-model.md`** in the format below. Show it to the human before building.
@@ -46,13 +47,31 @@ Last updated: <date> · Backend shape: <from AGENTS.md section 1>
 ## Top risks
 | # | Risk | Entry point | Worst case | Closed by |
 
+## Alerts
+| Alert | Signal | Threshold | Wired to |
+
+## Resilience drills
+| Drill | Last run | Result |
+
 ## Open questions for the human
 - <anything not closed by the spine>
 ```
 
+## Read-only mode
+
+When reviewing an existing backend (`review-mode.md`), build the same one-page model from the code, and change nothing.
+
+- **Data:** from the schema, migrations, and models. Classify each column group as personal, sensitive, or internal.
+- **Callers:** from the auth middleware, role definitions, API-key or service-auth code, and webhook handlers.
+- **Entry points:** from registered routes, webhook handlers, socket handlers, scheduled jobs, and upload endpoints. Use the recipe's inventory check if the stack has one. Note any entry point the code registers in more than one way.
+- **Trust boundaries:** from outbound HTTP calls, inbound webhooks, file storage, and the database connection.
+- **The four questions per entry point** become findings when the answer is yes, with `file:line` evidence.
+- **Worst case** is judgment: label it *guess*.
+- Write the model into the review report, not into `docs/threat-model.md`. If the repo already has one, compare the two and report every entry point that is in one but not the other.
+
 ## While building
 
-- Before writing an endpoint, find its row in the entry-point table. If it is missing, add it.
+- Before writing an endpoint, find its row in the entry-point table. If it is missing, add it. The inventory test fails until you do.
 - If a change adds a caller, a data type, or a trust boundary, update the file in the same change.
 - In the final report for any feature, say which top risks it touched and whether each is still closed.
 

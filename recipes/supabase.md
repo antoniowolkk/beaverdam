@@ -8,7 +8,7 @@ Installing anything, linking a remote project, `supabase db push`, `supabase fun
 
 ## What is proven, and what is not
 
-The complete migration in this recipe is `examples/supabase-sql-check/migration.sql`. The SQL excerpts below are copied from it. It was run against real Postgres 18.4 with a stub for Supabase's roles and `auth` schema (`supabase-stub.sql`), and passes 42 checks: RLS isolation, column grants, constraints, audit rows, denial audits that survive commit, role-change rules, the rate limiter, the quota RPC, and the section 13 spine queries. Four deliberate breakages (default grants left on, `raise` instead of `return`, unpinned `search_path`, `using (true)`) were each caught.
+The complete migration in this recipe is `examples/supabase-sql-check/migration.sql`. The SQL excerpts below are copied from it. It was run against real Postgres 18.4 with a stub for Supabase's roles and `auth` schema (`supabase-stub.sql`), and passes 49 checks: RLS isolation, column grants, constraints, audit rows, denial audits that survive commit, role-change rules, the rate limiter, the quota RPC, the section 13 spine queries, the section 15 inventory and signal queries, and concurrency checks: 20 parallel quota calls, 20 parallel pairs of owners demoting each other, and a double delete (sections 8 and 12). It also checks that the pre-request hook can be called as `anon`, and that `anon` can execute nothing else in `private`. Four deliberate breakages (default grants left on, `raise` instead of `return`, unpinned `search_path`, `using (true)`) were each caught.
 
 Not proven here, because the Supabase CLI needs Docker and none was available: PostgREST behaviour (the pre-request hook registration, error responses, `request.*` settings as PostgREST sets them), Supabase Auth settings, Edge Functions, Storage policies, Realtime, pgTAP via `supabase test db`, and `supabase db lint`. Those sections are written from the Supabase and PostgREST docs and are marked **unproven**. Prove them on the first real project and update this line.
 
@@ -63,7 +63,8 @@ Where things go:
 | Generate types | `supabase gen types typescript --local > src/types/database.ts` |
 | Serve functions locally | `supabase functions serve --env-file supabase/functions/.env` |
 | Spine SQL check without Docker | `cd examples/supabase-sql-check && npm install && npm test` |
-| Secret scan | `gitleaks protect --staged` (newer gitleaks: `gitleaks git --staged`) |
+| Secret scan (staged) | `gitleaks git --staged` (checked on gitleaks 8.30.1; older versions: `gitleaks protect --staged`) |
+| Secret scan (full history) | `gitleaks git --log-opts="--all"` (checked on 8.30.1: scans every commit on every branch) |
 
 Never without a yes: `supabase link`, `supabase db push`, `supabase functions deploy`, `supabase secrets set`, anything with `--db-url` pointing at a remote database.
 
@@ -136,7 +137,7 @@ Deny by default. Row Level Security on every table in an exposed schema, Supabas
 ```sql
 create schema if not exists private;
 revoke all on schema private from public;
-grant usage on schema private to authenticated; -- RLS policies call private.has_permission()
+grant usage on schema private to anon, authenticated; -- RLS policies call private.has_permission(); the pre-request hook runs as anon too. No private table is granted to either.
 ```
 
 **Role model.** Memberships link users to orgs with a role. The role matrix from `docs/prd.md` is a table.
@@ -454,7 +455,8 @@ as $$
 declare
   v_org uuid;
 begin
-  select org_id into v_org from public.invoices where id = p_id;
+  -- for update: a second delete of the same invoice waits, then finds it gone and is denied.
+  select org_id into v_org from public.invoices where id = p_id for update;
   if v_org is null or not private.has_permission(v_org, 'invoice.delete') then
     -- Return, do not raise: an exception would roll back this audit row.
     perform private.audit('invoice.delete', 'invoice', p_id::text, 'denied');
@@ -472,7 +474,7 @@ grant execute on function public.delete_invoice(uuid) to authenticated;
 
 **Revoke `execute` from `public` and `anon` on every function.** Postgres grants `execute` to `PUBLIC` by default, and Supabase grants functions in `public` to `anon` and `authenticated`. A `security definer` function left executable by `anon` is an unauthenticated back door.
 
-Role changes follow the same shape and enforce the rules in `skills/rbac.md`: owners only, the last owner cannot be demoted, every attempt audited with old and new role.
+Role changes follow the same shape and enforce the rules in `skills/rbac.md`: owners only, the last owner cannot be demoted, every attempt audited with old and new role. The harness also runs these under concurrency. Before the org-row lock, 20 of 20 pairs of owners demoting each other at once left an org with no owner. Before the `for update` in `delete_invoice`, a double delete returned `true` twice with one audit row. Both are caught now, and both breaks were re-checked.
 
 ```sql
 create function public.change_member_role(p_org uuid, p_user uuid, p_role public.app_role)
@@ -484,6 +486,9 @@ declare
   v_owners integer;
   v_res    text := p_org::text || ':' || p_user::text;
 begin
+  -- One role change per org at a time, so the owner count below cannot go stale.
+  -- Locking the owner rows instead would deadlock two owners demoting each other.
+  perform 1 from public.orgs where id = p_org for update;
   select role into v_old from public.memberships where org_id = p_org and user_id = p_user for update;
   if v_old is null or not private.has_permission(p_org, 'member.role_change') then
     perform private.audit('member.role_change', 'membership', v_res, 'denied');
@@ -527,6 +532,26 @@ export function newRequest() {
   return { requestId, log, reply };
 }
 ```
+
+**CORS.** A browser calling a function from another origin needs CORS headers. Many examples use `"access-control-allow-origin": "*"`. Not here: these functions read the `Authorization` header, so only listed origins get headers.
+
+```ts
+// supabase/functions/_shared/cors.ts
+const ALLOWED = (Deno.env.get("ALLOWED_ORIGINS") ?? "").split(",").map((o) => o.trim()).filter(Boolean);
+
+export function cors(req: Request): Record<string, string> {
+  const origin = req.headers.get("origin");
+  if (!origin || !ALLOWED.includes(origin)) return {}; // unlisted: no headers, the browser blocks the read
+  return {
+    "access-control-allow-origin": origin, // echoed only after the allowlist check
+    "access-control-allow-headers": "authorization, content-type, apikey, x-client-info, x-request-id",
+    "access-control-allow-methods": "POST, OPTIONS",
+    vary: "Origin",
+  };
+}
+```
+
+Answer the preflight first (`if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(req) });`) and add `...cors(req)` to the headers in `reply()`. `ALLOWED_ORIGINS` is config, not a secret, and matches ADR 0001.
 
 ```ts
 // supabase/functions/send-invoice/index.ts
@@ -616,6 +641,7 @@ create policy invoice_files_upload on storage.objects
 
 ## 12. Backend-shape extras → `skills/backend-shape.md`
 
+- **Every shape, no check-then-write:** shared counters change in one statement. `private.hit()` (section 6) is one `insert … on conflict do update … returning`, and the harness fires 20 `take_quota` calls in parallel on separate connections and gets exactly 10. The broken version, which does `select`, then check, then `update`, passed the sequential quota test and granted 20 of 20 in parallel. Test shared-state RPCs in parallel, not one call at a time.
 - **Transactional:** an RPC function is one transaction, so multi-step writes go in one RPC. Idempotency: an `idempotency_keys` table with `primary key (user_id, key)`, checked and written inside the same RPC (same flow as the Node recipe, section 12). Outbox: insert into an outbox table (or a Supabase Queue, which is `pgmq`) inside the RPC; an Edge Function on a schedule drains it. Never call a payment provider from inside a database function.
 - **Analytics:** reporting views with `security_invoker = true`, read through an RPC that takes the `export` quota and writes a `data.export` audit row. Heavy reads go to a read replica if the plan has one.
 - **Real-time:** section 11.
@@ -623,7 +649,7 @@ create policy invoice_files_upload on storage.objects
 
 ## 13. Tests
 
-**Without Docker:** `examples/supabase-sql-check/` runs the migration on a throwaway Postgres with a stub of Supabase's roles and `auth.uid()`, then runs 42 checks as `anon` and `authenticated`, the way PostgREST would. Copy its structure for a project's own migration.
+**Without Docker:** `examples/supabase-sql-check/` runs the migration on a throwaway Postgres with a stub of Supabase's roles and `auth.uid()`, then runs 49 checks as `anon` and `authenticated`, the way PostgREST would. Copy its structure for a project's own migration.
 
 **In a project,** pgTAP under `supabase/tests/`, run with `supabase test db` (**unproven here**). Act as a user by setting the role and claims inside the test transaction:
 
@@ -712,6 +738,37 @@ The pre-merge checklist in `AGENTS.md` section 6, for this stack:
 - [ ] No authorization on `user_metadata`.
 - [ ] The secret-key grep from section 1 prints nothing. Secret scan passes.
 - [ ] Every new Edge Function verifies the caller (or the webhook signature), validates with zod, takes a quota if expensive, and replies through `reply()`.
+- [ ] The inventory query from section 15 matches the entry-point table in `docs/threat-model.md`.
+
+## 15. Observability → `skills/observability.md`
+
+**Endpoint inventory.** With no route layer, the entry points are whatever the API roles can reach in the exposed schema: tables and views they hold any privilege on, and functions they can execute. This query lists them in the same form as the first column of the threat model's entry-point table (`rpc public.delete_invoice`, `table public.invoices`). The harness compares the two and fails on an unlisted object and on a stale row; both were broken once and caught.
+
+```sql
+select 'rpc public.' || p.proname as entry from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public'
+  and (has_function_privilege('anon', p.oid, 'execute') or has_function_privilege('authenticated', p.oid, 'execute'))
+union all
+select 'table public.' || c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public' and c.relkind in ('r','p','v','m')
+  and (has_any_column_privilege('anon', c.oid, 'select,insert,update') or has_table_privilege('anon', c.oid, 'delete')
+    or has_any_column_privilege('authenticated', c.oid, 'select,insert,update') or has_table_privilege('authenticated', c.oid, 'delete'))
+order by 1;
+```
+
+`has_any_column_privilege`, not `has_table_privilege`: tables here use column-level grants (section 3), which `has_table_privilege` does not see. The query assumes `public` is the only exposed schema; add a branch for each other schema the project exposes. Edge Functions, Storage buckets, and Realtime channels are entry points too and need their own rows, listed by hand (**unproven**: nothing here enumerates them).
+
+**Signals.** Denials are countable per action straight from the audit table. The harness runs this and sees the denials its own tests caused.
+
+```sql
+select action, count(*)::int as denied from private.audit_log
+where result = 'denied' and timestamp > now() - interval '1 hour'
+group by action order by action;
+```
+
+Run it from a scheduled job or the SQL editor as the owner, never through the API: `private` is not exposed.
+
+**Health, duration, alerts (unproven).** Supabase runs the database, so there is no readiness check to write in SQL. If the project has Edge Functions, a `health` function returns `{ "status": "ok" }` only, through `reply()`. Request durations and 4xx/5xx counts are not in the audit table; they have to come from whatever request and database logs the Supabase project provides. None of that was checked here: look at what the project's plan offers, and write what you found into the threat model's alert table. Sending alerts outside Supabase is an outbound integration and needs an ADR.
 
 ## When this recipe is out of date
 

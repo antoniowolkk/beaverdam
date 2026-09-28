@@ -14,6 +14,8 @@ A secret is anything that grants access: API keys, database URLs with passwords,
 - **Never in:** source code, git history, logs, error messages, test fixtures, seed files, client bundles, API responses, commit messages, PR descriptions.
 - **Least privilege.** Each key has only the permissions this backend needs. Separate keys per environment (dev, staging, production). Never reuse a production key locally.
 - **Rotation path documented** for each secret: who rotates it, where, what needs a restart.
+- **Expiry recorded.** Each secret in `docs/secrets.md` has an expiry date and a last-rotated date. A secret with no expiry says so, with the reason (for example, the provider does not support one).
+- **Scan history, not only staged changes.** A secret deleted from the current files is still in every earlier commit. Scan the full history when the spine is first set up, before a repo is made public or shared with anyone new, and on a schedule in CI.
 
 ## Anything shipped to a client is public
 
@@ -30,6 +32,7 @@ Frontend bundles and mobile apps are readable by anyone. A key that ends up ther
 4. **Add it to the redaction list** used by the logger (see `audit-log.md`), so an accidental log of the config object prints `[REDACTED]`.
 5. **Record the rotation path** in `docs/secrets.md`: name, purpose, where it lives, who rotates, what restarts. Names only, never values.
 6. **Run the secret scan** from section 4 of `AGENTS.md` before calling the change done.
+7. **Run the full-history scan** from section 4 on setup and before a repo is made public or shared. A hit is a leak even if the file is gone: go to `incident-checklist.md`.
 
 ## Flag before writing
 
@@ -49,7 +52,8 @@ Removing it from the latest commit is not enough. It is in git history, and poss
 - [ ] Name in `.env.example`, value nowhere in the repo
 - [ ] Read through the config module, fails fast if missing
 - [ ] On the logger redaction list
-- [ ] Rotation path in `docs/secrets.md`
+- [ ] Rotation path, expiry, and last-rotated date in `docs/secrets.md`
 - [ ] Secret scan passes, output pasted
+- [ ] Full-history scan passed on setup and before any repo was made public, output pasted
 
 `AGENTS.md` section 7 outranks this doc wherever they disagree. Creating, reading, printing, or modifying a secret always needs a yes first.

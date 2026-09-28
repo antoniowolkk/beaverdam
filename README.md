@@ -1,6 +1,6 @@
 # beaverdam
 
-The security spine for every backend an AI agent builds. A rule set that makes the agent scaffold auth, secrets handling, RBAC, input validation, rate limiting, structured audit logging, and safe error handling by default, in whatever stack the project runs, without you naming each one.
+The security spine for every backend an AI agent builds. A rule set that makes the agent scaffold auth, secrets handling, RBAC, input validation, rate limiting, structured audit logging, safe error handling, and security observability by default, in whatever stack the project runs, without you naming each one.
 
 The goal is not more security code. It is the same security baseline on every backend, instead of a fresh improvisation each time.
 
@@ -56,25 +56,27 @@ Using junior-agent too? Use beaverdam's `AGENTS.md` as the project file instead 
 | `skills/audit-log.md` | The one log schema. Flags state-changing endpoints with no audit entry. |
 | `skills/input-validation.md` | Boundary validation. Flags raw request data in a query or write. |
 | `skills/rate-limit.md` | What needs limiting, and default thresholds. |
+| `skills/observability.md` | Endpoint inventory checked by a test, countable security signals, health checks, the alert list. |
+| `skills/review-mode.md` | Read-only review of an existing backend: findings with evidence, severity, and confidence. Changes nothing. |
 | `skills/incident-checklist.md` | Runbook, not a build rule: what to do when a key leaks or an account is compromised. |
 | `recipes/node-express.md` | Spine → Node/Express + Postgres code. |
 | `recipes/supabase.md` | Spine → Supabase RLS, policies, edge functions. |
 | `recipes/python-fastapi.md` | Spine → FastAPI code. Added when a project needs it. |
-| `examples/supabase-sql-check/` | The Supabase recipe's full migration, run on a throwaway Postgres with a stub of Supabase's roles and `auth` schema. 42 checks, no Docker needed. |
-| `examples/node-express-demo/` | Pattern A (session + CSRF) built from the Node recipe: 16 integration tests against a throwaway Postgres. The proof the recipe works. |
+| `examples/supabase-sql-check/` | The Supabase recipe's full migration, run on a throwaway Postgres with a stub of Supabase's roles and `auth` schema. 49 checks, no Docker needed. |
+| `examples/node-express-demo/` | Pattern A (session + CSRF) built from the Node recipe: 26 integration tests against a throwaway Postgres. The proof the recipe works. |
 | `LICENSE` | MIT. |
 
 Recipes are additive. A new stack is a new file; the core never changes to fit one. No recipe for your stack yet? The agent follows the abstract rule in `skills/` and asks before writing any auth, secrets, or RBAC pattern. Those three are never improvised.
 
 ## The three rules that make it work
 
-**Complete by default.** Section 5 of `AGENTS.md` lists seven things every backend gets from the first endpoint: auth, secrets, RBAC, input validation, rate limiting, audit logging, error handling. Not "before launch". The agent does not wait to be asked for each one, and it does not decide per project whether one applies.
+**Complete by default.** Section 5 of `AGENTS.md` lists eight things every backend gets from the first endpoint: auth, secrets, RBAC, input validation, rate limiting, audit logging, error handling, observability. Not "before launch". The agent does not wait to be asked for each one, and it does not decide per project whether one applies.
 
 **Same shape everywhere.** One approved list of auth patterns. One audit-log schema: timestamp, request id, actor, action, resource, result, source. One error handler. When every backend logs and fails the same way, you, a teammate, or an agent debugging it later can tell what happened, who did it, and whether it is safe to act next, without reverse-engineering a new logging style each time.
 
 **Strict where it matters.** Section 7 is strict: the agent stops and asks before touching auth, roles, rate limits, CORS, secrets, migrations, or anything outside localhost. It never weakens a check to make a test pass. Every endpoint gets tests for the success path, invalid input, no credentials, and wrong role, and the unauthorized tests are never deleted to reach green.
 
-**The cost is some speed on throwaway work.** For spikes there is a prototype mode, opted into explicitly, per session. It lets the agent skip rate limiting, full RBAC, and audit logging. It never skips secrets handling or auth on anything reachable from outside localhost, and prototype code never merges without the full spine.
+**The cost is some speed on throwaway work.** For spikes there is a prototype mode, opted into explicitly, per session. It lets the agent skip rate limiting, full RBAC, audit logging, and observability beyond health checks and the endpoint inventory. It never skips secrets handling or auth on anything reachable from outside localhost, and prototype code never merges without the full spine.
 
 ## Why this instead of a bare agent
 
@@ -96,6 +98,7 @@ Against **a security scanner**, the difference is timing. Scanners find the miss
 | Audit logging | Structured schema, local | Log shipping / SIEM |
 | Input validation | Boundary validation | Schema-driven contracts end to end (OpenAPI, Zod) |
 | Rate limiting | Fixed thresholds | Adaptive / anomaly-based |
+| Observability | Endpoint inventory, countable signals, health checks, documented alert list | Metrics backend, alert delivery |
 | Incident response | Checklist | Automated alerting hooks |
 | Compliance mapping | Out of scope | SOC2 / ISO27001, if a client requires it |
 | Agent-specific guardrails | Out of scope, lives in junior-agent's planned governance skill | Cross-referenced once both exist |
@@ -112,6 +115,7 @@ Recipes go stale as frameworks version. When a project surfaces drift between a 
 
 - [ ] No `<...>` placeholders left in `AGENTS.md`
 - [ ] Every command in section 4 actually runs, including the secret scan
+- [ ] Full-history secret scan run once, output read
 - [ ] `docs/prd.md` filled in by a human, with the role model
 - [ ] Backend shape set in section 1
 - [ ] `docs/threat-model.md` written and read

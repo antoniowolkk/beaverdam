@@ -75,13 +75,14 @@ Use these exact commands. Do not invent alternatives.
 | Lint | `<...>` |
 | Type check | `<...>` |
 | New migration (write only) | `<...>` |
-| Secret scan (staged changes) | `<e.g. gitleaks protect --staged>` |
+| Secret scan (staged changes) | `<e.g. gitleaks git --staged>` |
+| Secret scan (full history) | `<e.g. gitleaks git --log-opts="--all">`. On setup, before the repo is made public or shared, and on a schedule in CI |
 
 A change is not done until lint, type check, the full test suite, and the secret scan pass.
 
 ## 5. The security spine — non-negotiable
 
-Every backend gets all seven, from the first endpoint. Not "later", not "before launch". The detail for each lives in `.beaverdam/skills/`; the stack-specific code lives in the recipe.
+Every backend gets all eight, from the first endpoint. Not "later", not "before launch". The detail for each lives in `.beaverdam/skills/`; the stack-specific code lives in the recipe.
 
 **1. Auth** — `skills/auth-spine.md`
 - One pattern per project, chosen from the approved list: **session cookie + CSRF protection**, or **short-lived access token + refresh token**. Record the choice in an ADR.
@@ -89,12 +90,15 @@ Every backend gets all seven, from the first endpoint. Not "later", not "before 
 - Expiry is documented and enforced server-side. Refresh is handled explicitly, never by silently extending a token.
 - Passwords are hashed with a slow, salted algorithm (argon2id or bcrypt). Never reversible encryption, never a fast hash.
 - No security by obscurity: an unlisted route is still a public route.
+- CORS: an explicit origin list from config, recorded in the auth ADR. Never `*` or a reflected `Origin` on anything that reads a cookie or `Authorization` header.
+- API keys issued to machine callers (once an ADR approves them) are stored hashed, scoped, expire (default 90 days at most), and can be revoked at once.
 
 **2. Secrets** — `skills/secrets-handling.md`
 - Read from environment or the secrets manager only. One source per secret, referenced by name, never copied into a second file.
 - Never in code, git history, logs, error messages, test fixtures, or any client-visible response.
 - `.env.example` lists names only, never values. `.env` is gitignored before the first commit.
-- Each secret has a documented rotation path (who rotates it, where, what restarts).
+- Each secret has a documented rotation path (who rotates it, where, what restarts), an expiry date, and a last-rotated date.
+- The full git history is scanned for secrets on setup and before the repo is made public or shared, not only staged changes.
 - If you are about to write something that looks like a key or token, stop and ask.
 
 **3. RBAC** — `skills/rbac.md`
@@ -140,7 +144,14 @@ Every backend gets all seven, from the first endpoint. Not "later", not "before 
 - The client gets a safe message and the request id. Never a stack trace, SQL, internal path, or library error text.
 - One error handler, in one place.
 
-**Backend-shape extras** — applied on top of the seven, based on section 1:
+**8. Observability** — `skills/observability.md`
+- Every live route, webhook, socket, and job is a row in the entry-point table of `docs/threat-model.md`, and a test fails when the code and the table disagree.
+- Denials, 401/403/429, failed logins, audit-write failures, and 5xx are countable per route from the log fields above. Every request logs its duration.
+- A liveness and a readiness check, public and rate limited, returning a status only: no version, environment, or error detail.
+- What would alert, and on what threshold, is written in `docs/threat-model.md`. Wiring alerts or log shipping to an outside service needs an ADR.
+
+**Backend-shape extras** — applied on top of the eight, based on section 1:
+- **Every shape:** no check-then-write on shared state. One atomic statement, a row lock in a transaction, or a unique constraint, tested with parallel requests.
 - **Transactional:** idempotency keys on every write that moves money or stock; database transactions around multi-step writes; outbox pattern for side effects (emails, webhooks) that must not double-fire.
 - **Analytics / reporting:** read replica or cache for heavy reads; exports are rate limited and audit logged.
 - **Real-time:** authenticate the socket connection, re-check authorization per channel or room, rate limit messages.
@@ -161,6 +172,8 @@ Every backend gets all seven, from the first endpoint. Not "later", not "before 
 
 1. Run `skills/backend-shape.md`. If the data shape or traffic shape is not stated or obvious, ask the human one short question. Do not infer silently. Write the answer into section 1.
 2. Run `skills/threat-model.md`. Write `docs/threat-model.md`: what data this touches, who can reach each endpoint, the worst case if it is exposed. Refer back to it while building.
+
+**Reviewing existing code, with no changes asked for:** follow `skills/review-mode.md`. Change nothing in the repo, and report findings with `file:line` evidence, severity, and confidence.
 
 **Then, for anything that ships:**
 
@@ -188,6 +201,8 @@ Every backend gets all seven, from the first endpoint. Not "later", not "before 
 - [ ] No public endpoint without a rate limit
 - [ ] No secret, token, or personal data in code, logs, fixtures, or responses
 - [ ] No empty catch, no stack trace or internal detail reaching the client
+- [ ] No entry point missing from the inventory in `docs/threat-model.md`; the inventory test passes
+- [ ] No CORS wildcard or reflected origin; no check-then-write on shared state
 
 Rules:
 - If you cannot describe how a task would be verified, it is not ready to implement. Ask instead.
@@ -195,7 +210,7 @@ Rules:
 - Never delete or skip a test to get to green, least of all an unauthorized or forbidden-path test.
 - Do not claim something works unless you ran it and saw it pass. Paste the real output.
 
-**Prototype mode** is allowed only for throwaway spikes and only when the human says so explicitly, in this session. In prototype mode you may skip rate limiting, full RBAC, and the audit log. You may **not** skip secrets handling or auth on anything reachable from outside localhost. Mark prototype code with a `PROTOTYPE:` comment at the top of each file. Prototype code never merges to the main branch without the full spine added and tested.
+**Prototype mode** is allowed only for throwaway spikes and only when the human says so explicitly, in this session. In prototype mode you may skip rate limiting, full RBAC, the audit log, and observability beyond the health checks and the endpoint inventory. You may **not** skip secrets handling or auth on anything reachable from outside localhost. Mark prototype code with a `PROTOTYPE:` comment at the top of each file. Prototype code never merges to the main branch without the full spine added and tested.
 
 ## 6b. Which skill, which recipe
 
@@ -211,6 +226,8 @@ The skills are plain markdown. Nothing loads automatically. Read the one the tas
 | New state-changing endpoint, or any logging | `skills/audit-log.md` |
 | New endpoint, webhook, upload, or query | `skills/input-validation.md` |
 | New public or expensive endpoint | `skills/rate-limit.md` |
+| New or removed route, health check, alerting, or "how would we know?" | `skills/observability.md` |
+| Reviewing or auditing an existing backend, or bringing beaverdam into existing code | `skills/review-mode.md` — change nothing, report findings |
 | A key leaked, an account looks compromised, suspicious log entries | `skills/incident-checklist.md` — stop building and tell the human first |
 
 Always read the matching section of `.beaverdam/recipes/<stack>.md` alongside the skill.

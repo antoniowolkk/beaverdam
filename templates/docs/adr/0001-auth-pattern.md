@@ -26,6 +26,8 @@ We use **<Pattern A: session cookie + CSRF | Pattern B: short-lived access token
 | Minimum password length | <...> | 12 |
 | Password reset token lifetime | <...> | ≤ 1 h |
 | Login rate limits | <...> | 5 failures / 15 min per account, 20 / min per IP |
+| Allowed CORS origins | <none (same site) \| exact origins> | none for pattern A; never `*` with credentials |
+| API key maximum lifetime (only if an ADR approves API keys) | <...> | 90 days |
 
 Deviations from `auth-spine.md`, each with the reason:
 

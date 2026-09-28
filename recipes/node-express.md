@@ -4,7 +4,7 @@ How each part of the spine in `AGENTS.md` section 5 looks in a Node/Express back
 
 Code is TypeScript, ESM, Express 5. Where a pattern depends on which auth pattern the project's ADR picked, both are shown: keep one, delete the other.
 
-Installing any package below needs a yes first (`AGENTS.md` section 7). The versions below are the ones pattern A was last proven against in `examples/node-express-demo/` (type check + 16 integration tests on real Postgres, 2026-09-24). Pattern B (section 6) and the Redis store type-check but have not been run end to end. If a major has moved since, check the changelog for the APIs used here before copying code.
+Installing any package below needs a yes first (`AGENTS.md` section 7). The versions below are the ones pattern A was last proven against in `examples/node-express-demo/` (type check + 26 integration tests on real Postgres, first 2026-09-24, last 2026-09-28). Pattern B (section 6) and the Redis store type-check but have not been run end to end. If a major has moved since, check the changelog for the APIs used here before copying code.
 
 ## Stack
 
@@ -45,13 +45,15 @@ src/
     tokens.ts            pattern B: issue/verify access, rotate refresh, authenticate
     permissions.ts       ROLES, PERMISSIONS, can()
     secure-route.ts      secureRoute(): the only way to register a route
+    inventory.ts         mount(), routeInventory(): the live route list
     audit.ts             ACTIONS, audit(), audited()
     limits.ts            LIMITS config + limiter factory
-  routes/                one file per resource, thin
+  routes/                one file per resource, thin; health.ts for liveness and readiness
   services/              business logic, takes Actor + validated data, never req
   schemas/               zod schemas per resource
 migrations/
 tests/
+docs/threat-model.md     its entry-point table is the endpoint inventory (section 15)
 ```
 
 ## Commands for `AGENTS.md` section 4
@@ -67,7 +69,8 @@ Suggested `package.json` scripts. The project's real scripts win; update section
 | Lint | `npx eslint .` |
 | Type check | `npx tsc --noEmit` |
 | New migration (write only) | `npx node-pg-migrate create <name> --migration-file-language sql` |
-| Secret scan | `gitleaks protect --staged` (newer gitleaks: `gitleaks git --staged`; check `gitleaks --help`) |
+| Secret scan (staged) | `gitleaks git --staged` (checked on gitleaks 8.30.1; older versions: `gitleaks protect --staged`) |
+| Secret scan (full history) | `gitleaks git --log-opts="--all"` (checked on 8.30.1: scans every commit on every branch) |
 
 ---
 
@@ -142,23 +145,24 @@ One logger. JSON with the field names from the audit schema. Redaction at the lo
 // src/logger.ts
 import pino from "pino";
 
+// `*.x` matches one level deep. Add a path when you add a nested secret-bearing field.
+// Every name in config.ts SECRET_NAMES must be here too (tests/integrity.test.ts checks it).
+export const REDACT_PATHS = [
+  "password", "*.password", "new_password", "*.new_password",
+  "token", "*.token", "refresh_token", "*.refresh_token", "access_token", "*.access_token",
+  "secret", "*.secret", "api_key", "*.api_key",
+  "DATABASE_URL", "*.DATABASE_URL", "SESSION_SECRET", "*.SESSION_SECRET", "REDIS_URL", "*.REDIS_URL",
+  "req.headers.authorization", "req.headers.cookie", "req.headers['x-csrf-token']",
+  "res.headers['set-cookie']",
+];
+
 export const logger = pino({
   level: process.env.LOG_LEVEL ?? "info",
   base: undefined, // no pid/hostname noise; the platform adds its own
   messageKey: "message",
   timestamp: () => `,"timestamp":"${new Date().toISOString()}"`,
   formatters: { level: (label) => ({ level: label }) },
-  redact: {
-    // `*.x` matches one level deep. Add a path when you add a nested secret-bearing field.
-    paths: [
-      "password", "*.password", "new_password", "*.new_password",
-      "token", "*.token", "refresh_token", "*.refresh_token", "access_token", "*.access_token",
-      "secret", "*.secret", "api_key", "*.api_key",
-      "req.headers.authorization", "req.headers.cookie", "req.headers['x-csrf-token']",
-      "res.headers['set-cookie']",
-    ],
-    censor: "[REDACTED]",
-  },
+  redact: { paths: REDACT_PATHS, censor: "[REDACTED]" },
 });
 ```
 
@@ -422,6 +426,41 @@ CREATE INDEX session_expire_idx ON session (expire);
 
 Login and logout are in section 9, because they use `audited()`.
 
+**CORS (pattern A).** Same site, so no CORS middleware and no `Access-Control-*` headers. Browsers then refuse to let any other origin read a response. The test pins that down, so a CORS package added later without an ADR fails it. Checked in the demo: a middleware that echoes back `Origin` with `credentials` makes both cases fail.
+
+```ts
+// tests/cors.test.ts
+import { describe, it, expect, afterAll } from "vitest";
+import request from "supertest";
+import { app } from "../src/app.js";
+import { pool } from "../src/db.js";
+import { owner } from "./helpers.js";
+import { ORIGIN } from "./db-urls.js";
+
+afterAll(async () => {
+  await pool.end();
+  await owner.end();
+});
+
+// Pattern A is same-site: the API sends no CORS headers at all, so a browser on
+// another origin can never read a response, with or without credentials.
+describe("CORS (pattern A)", () => {
+  for (const origin of ["https://evil.example", ORIGIN]) {
+    it(`no Access-Control-* headers for Origin ${origin}`, async () => {
+      const get = await request(app).get("/health/live").set("Origin", origin);
+      const preflight = await request(app)
+        .options("/invoices")
+        .set("Origin", origin)
+        .set("Access-Control-Request-Method", "POST")
+        .set("Access-Control-Request-Headers", "content-type, x-csrf-token");
+      for (const res of [get, preflight]) {
+        expect(Object.keys(res.headers).filter((h) => h.startsWith("access-control-"))).toEqual([]);
+      }
+    });
+  }
+});
+```
+
 ## 6. Auth, pattern B: access token + refresh token → `skills/auth-spine.md`
 
 ```ts
@@ -543,7 +582,7 @@ res.cookie("rt", token, {
 });
 ```
 
-Pattern B with a browser frontend on another origin needs CORS with an explicit origin list (`cors({ origin: config.ALLOWED_ORIGINS, credentials: true })`). Adding or changing CORS needs an ADR (`AGENTS.md` section 7).
+Pattern B with a browser frontend on another origin needs CORS with an explicit origin list (`cors({ origin: config.ALLOWED_ORIGINS, credentials: true })`). Never `origin: "*"`, `origin: true` (which echoes back any origin), or a regex. Test that a listed origin gets `Access-Control-Allow-Origin` and a foreign one does not (**unproven**: the demo is pattern A and has no `cors` package). Adding or changing CORS needs an ADR (`AGENTS.md` section 7).
 
 ## 7. Passwords (both patterns) → `skills/auth-spine.md`
 
@@ -751,7 +790,9 @@ export async function audit(
     );
   } catch (err) {
     logger.error({ kind: "security", err, action, request_id: req.id }, "audit write failed");
-    if (MUST_PERSIST.has(action)) throw err;
+    // Inside a transaction the failed insert has aborted it: COMMIT would silently roll back
+    // while the client is told it worked. So fail the request, whatever the action.
+    if (opts.db || MUST_PERSIST.has(action)) throw err;
   }
 }
 
@@ -784,7 +825,10 @@ export function audited(
       });
     } catch (err) {
       const result = err instanceof AppError && err.status < 500 ? "denied" : "error";
-      await audit(req, action, ctx.resource, result, ctx.detail).catch(() => {}); // already logged inside audit()
+      await audit(req, action, ctx.resource, result, ctx.detail).catch((auditErr) => {
+        // A DB failure was already logged inside audit(); this also catches anything else.
+        logger.error({ kind: "security", err: auditErr, action, request_id: req.id }, "error-path audit failed");
+      });
       throw err;
     }
     reply.body === undefined ? res.status(reply.status).end() : res.status(reply.status).json(reply.body);
@@ -994,6 +1038,8 @@ import { errorHandler, notFound } from "./security/errors.js";
 import { sessions, checkOrigin } from "./security/session.js"; // pattern A
 import { auth } from "./routes/auth.js";
 import { invoices } from "./routes/invoices.js";
+import { health } from "./routes/health.js";
+import { mount } from "./security/inventory.js";
 
 export const app = express();
 
@@ -1007,16 +1053,19 @@ app.use(express.json({ limit: "100kb" }));    // 4. bounded body parsing
 app.use(sessions);                            // 5. pattern A only
 app.use(checkOrigin);                         // 6. pattern A only; pattern B: cors({ origin: config.ALLOWED_ORIGINS })
 
-app.use("/auth", auth);                       // 7. routes, all registered via secureRoute()
-app.use("/invoices", invoices);
+mount(app, "/health", health);                // 7. routes, all registered via secureRoute(), all mounted via mount()
+mount(app, "/auth", auth);
+mount(app, "/invoices", invoices);
 
 app.use(notFound);                            // 8. unknown routes → 404 via the error handler
 app.use(errorHandler);                        // 9. last
 ```
 
-## 12. Transactional extras → `skills/backend-shape.md`
+## 12. Transactional extras → `skills/backend-shape.md` (unproven)
 
-Only when the backend shape is transactional.
+Only when the backend shape is transactional. None of this section runs in `examples/node-express-demo/`: it has not been type-checked or tested. The check-then-write rule below it holds for every shape.
+
+**No check-then-write on shared state (every shape).** Never `SELECT` a balance, stock count, or usage counter, check it in TypeScript, then `UPDATE` it. Two requests both pass the check. Put the check in the write (`UPDATE items SET stock = stock - 1 WHERE id = $1 AND stock > 0 RETURNING stock`, zero rows means sold out), use `INSERT … ON CONFLICT`, or take `SELECT … FOR UPDATE` inside `withTx`. Test it with parallel requests (`Promise.all` of 20 supertest calls), because a one-at-a-time test passes on the broken version. That was shown in `examples/supabase-sql-check`: a read-sleep-write quota passed the sequential test and granted 20 of 20 in parallel. The Node demo has no shared counter to test this on.
 
 **Idempotency keys** on every write that moves money or stock. The client sends `Idempotency-Key: <uuid>`; a repeat of the same key returns the first response instead of doing the work twice.
 
@@ -1169,6 +1218,67 @@ describe("no secrets in responses", () => {
 
 Also assert that unknown fields are rejected (`{ ...valid, role: "owner" }` → 400) on every create and update endpoint. That is the mass-assignment test.
 
+**Audit failure and redaction.** A failed audit insert inside `audited()` fails the request with a 500 and stores nothing. Without that rule, Postgres turns the later `COMMIT` of the aborted transaction into a silent rollback, and the client gets a 201 for a row that does not exist. The demo showed exactly that before the fix. The redaction test fails as soon as a secret is added to `SECRET_NAMES` but not to `REDACT_PATHS`. Both were broken once and caught.
+
+```ts
+// tests/integrity.test.ts
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
+import pino from "pino";
+import { pool } from "../src/db.js";
+import { logger, REDACT_PATHS } from "../src/logger.js";
+import { SECRET_NAMES } from "../src/config.js";
+import { loginAs, owner, resetDb } from "./helpers.js";
+
+beforeEach(resetDb);
+afterAll(async () => {
+  await pool.end();
+  await owner.end();
+});
+
+describe("audit write fails inside the handler's transaction", () => {
+  beforeEach(async () => {
+    // Owner-only test hook: make the audit insert for invoice.create fail, as a full disk or a bad column would.
+    await owner.query(`CREATE FUNCTION fail_create_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.action = 'invoice.create' THEN RAISE EXCEPTION 'audit write refused (test)'; END IF; RETURN NEW; END $$`);
+    await owner.query(`CREATE TRIGGER fail_create_audit BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION fail_create_audit()`);
+  });
+  afterEach(async () => {
+    await owner.query(`DROP TRIGGER IF EXISTS fail_create_audit ON audit_log`);
+    await owner.query(`DROP FUNCTION IF EXISTS fail_create_audit()`);
+    vi.restoreAllMocks();
+  });
+
+  it("the request fails, nothing is stored, and the failure is logged", async () => {
+    const errors = vi.spyOn(logger, "error");
+    const { agent, csrf, user } = await loginAs("member");
+    const res = await agent.post("/invoices").set("x-csrf-token", csrf)
+      .send({ customer_id: "3f2c6b1e-8a4d-4c2b-9f1a-2b7e5d9c0a11", amount_cents: 1999, currency: "EUR" });
+
+    expect(res.status).toBe(500);
+    expect((await owner.query(`SELECT 1 FROM invoices WHERE org_id = $1`, [user.org_id])).rowCount).toBe(0);
+    expect(errors.mock.calls.some((c) => c[1] === "audit write failed")).toBe(true);
+  });
+});
+
+describe("logger redaction", () => {
+  it("covers every secret name, top level and one level deep", () => {
+    for (const name of SECRET_NAMES) {
+      expect(REDACT_PATHS).toContain(name);
+      expect(REDACT_PATHS).toContain(`*.${name}`);
+    }
+  });
+
+  it("a logged config object prints no secret value", () => {
+    const lines: string[] = [];
+    const log = pino({ redact: { paths: REDACT_PATHS, censor: "[REDACTED]" } }, { write: (l: string) => void lines.push(l) });
+    const fake = Object.fromEntries(SECRET_NAMES.map((n) => [n, `value-of-${n}`]));
+    log.info(fake);
+    log.info({ config: fake });
+    expect(lines.join("")).not.toMatch(/value-of-/);
+  });
+});
+```
+
 ## 14. Checks before merge
 
 The pre-merge checklist in `AGENTS.md` section 6, as commands for this stack. Each should print nothing. Paste the output in the report.
@@ -1209,7 +1319,151 @@ grep -rnE "catch[[:space:]]*(\([^)]*\))?[[:space:]]*\{[[:space:]]*\}" src
 
 Empty catch blocks.
 
-Plus: type check passes (enforces `audited()` on write routes), full test suite passes, secret scan passes.
+```bash
+grep -rnE "\.catch\([[:space:]]*\(?[^)]*\)?[[:space:]]*=>[[:space:]]*(\{[[:space:]]*\}|undefined|null|void 0)[[:space:]]*\)" src
+```
+
+Promise `.catch` handlers that swallow the error (`.catch(() => {})`). The first grep does not see these.
+
+```bash
+grep -rnE "app\.use\([[:space:]]*['\"]/" src
+```
+
+Routers mounted with `app.use` instead of `mount()`. The inventory test also throws on these.
+
+```bash
+grep -rnE "Access-Control-Allow-Origin|origin:[[:space:]]*(['\"]\*['\"]|true)" src
+```
+
+CORS set by hand, a wildcard, or echoing back any origin.
+
+Plus: type check passes (enforces `audited()` on write routes), full test suite passes (includes the inventory test, section 15), secret scan passes.
+
+## 15. Observability → `skills/observability.md`
+
+**Endpoint inventory.** Express 5 does not expose the prefix a router is mounted under, so routers are mounted through `mount()`, which records it. `routeInventory()` then reads every route from Express's own route stack, not from `secureRoute()`, so a route registered some other way still shows up.
+
+```ts
+// src/security/inventory.ts
+import type { Express, Router } from "express";
+
+// Express 5 does not expose a mounted router's prefix, so mount() records it.
+const prefixes = new Map<unknown, string>();
+
+export function mount(app: Express, prefix: string, router: Router) {
+  prefixes.set(router, prefix);
+  app.use(prefix, router);
+}
+
+type Layer = { route?: { path: string; methods: Record<string, boolean> }; name?: string; handle: unknown };
+
+// Every live route, read from Express itself, so a route that skipped secureRoute() still shows up.
+// Same format as routeOf() and the audit log's source.route ("DELETE /invoices/:id"),
+// minus the trailing slash on a router's root route ("POST /invoices", not "POST /invoices/").
+export function routeInventory(app: Express): string[] {
+  const out: string[] = [];
+  const walk = (stack: Layer[], prefix: string) => {
+    for (const layer of stack) {
+      if (layer.route) {
+        const path = prefix && layer.route.path === "/" ? prefix : prefix + layer.route.path;
+        for (const m of Object.keys(layer.route.methods)) out.push(`${m.toUpperCase()} ${path}`);
+      } else if (layer.name === "router") {
+        const p = prefixes.get(layer.handle);
+        if (p === undefined) throw new Error("router mounted without mount(); its routes cannot be inventoried");
+        walk((layer.handle as { stack: Layer[] }).stack, prefix + p);
+      }
+    }
+  };
+  walk((app as unknown as { router: { stack: Layer[] } }).router.stack, "");
+  return out.sort();
+}
+```
+
+The test compares that list with the first column of the "Entry points" table in `docs/threat-model.md`. It fails on a live route missing from the table, a listed route that is gone, and a router mounted without `mount()`. Each of those was broken once in the demo and the test failed.
+
+**Health checks.** Registered through `secureRoute()` like everything else, so they are rate limited.
+
+```ts
+// src/routes/health.ts
+import { Router } from "express";
+import { secureRoute } from "../security/secure-route.js";
+import { pool } from "../db.js";
+
+export const health = Router();
+
+// Public and rate limited like any other route. Bodies carry a status only:
+// no version, environment, hostname, or dependency detail.
+secureRoute(health, "get", "/live", { public: true }, (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+secureRoute(health, "get", "/ready", { public: true }, async (req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ status: "ok" });
+  } catch (err) {
+    req.log.warn({ kind: "app", err }, "readiness check failed"); // detail to the log, never the body
+    res.status(503).json({ status: "unavailable" });
+  }
+});
+```
+
+**Duration.** `pino-http` already writes `responseTime` (milliseconds) on every completed-request line, next to `req.method`, `req.path`, and `res.status` from `logger.ts` (section 2). That is the duration signal; do not add a second timer. Checked in the `pino-http` 11.0 source, not asserted by a test.
+
+**Signals and alerts.** Denials, 429s, failed logins, and 5xx come from fields already on the log lines: `result` on audit entries, `res.status` on request lines, and `kind: security` on rate-limit hits. Counting them and sending alerts is the job of whatever collects stdout on the host. Wiring that is an outbound integration and needs an ADR (**unproven**: the demo has no collector).
+
+```ts
+// tests/observability.test.ts
+import { describe, it, expect, afterAll, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import request from "supertest";
+import { app } from "../src/app.js";
+import { pool } from "../src/db.js";
+import { routeInventory } from "../src/security/inventory.js";
+import { owner } from "./helpers.js";
+
+afterAll(async () => {
+  await pool.end();
+  await owner.end();
+});
+
+// First column of the "Entry points" table in docs/threat-model.md, e.g. `DELETE /invoices/:id`.
+async function documentedEntryPoints() {
+  const doc = await readFile("docs/threat-model.md", "utf8");
+  const section = doc.split(/^## Entry points$/m)[1]?.split(/^## /m)[0] ?? "";
+  return [...section.matchAll(/^\| `([^`]+)` \|/gm)].map((m) => m[1]).sort();
+}
+
+describe("endpoint inventory", () => {
+  it("every live route is in the threat model, and every listed route is live", async () => {
+    expect(routeInventory(app)).toEqual(await documentedEntryPoints());
+  });
+});
+
+describe("health", () => {
+  it("live: 200 with a status only", async () => {
+    const res = await request(app).get("/health/live").expect(200);
+    expect(res.body).toEqual({ status: "ok" });
+  });
+
+  it("ready: 200 with a status only when the database answers", async () => {
+    const res = await request(app).get("/health/ready").expect(200);
+    expect(res.body).toEqual({ status: "ok" });
+  });
+
+  it("ready: 503 and no error detail when the database is down", async () => {
+    const spy = vi.spyOn(pool, "query").mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:5432"));
+    const res = await request(app).get("/health/ready").expect(503);
+    spy.mockRestore();
+    expect(res.body).toEqual({ status: "unavailable" });
+  });
+
+  it("health checks are rate limited like any public route", async () => {
+    const res = await request(app).get("/health/live").expect(200);
+    expect(res.headers["ratelimit-policy"]).toBeDefined();
+  });
+});
+```
 
 ## When this recipe is out of date
 

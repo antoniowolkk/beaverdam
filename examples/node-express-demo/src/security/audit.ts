@@ -46,7 +46,9 @@ export async function audit(
     );
   } catch (err) {
     logger.error({ kind: "security", err, action, request_id: req.id }, "audit write failed");
-    if (MUST_PERSIST.has(action)) throw err;
+    // Inside a transaction the failed insert has aborted it: COMMIT would silently roll back
+    // while the client is told it worked. So fail the request, whatever the action.
+    if (opts.db || MUST_PERSIST.has(action)) throw err;
   }
 }
 
@@ -79,7 +81,10 @@ export function audited(
       });
     } catch (err) {
       const result = err instanceof AppError && err.status < 500 ? "denied" : "error";
-      await audit(req, action, ctx.resource, result, ctx.detail).catch(() => {}); // already logged inside audit()
+      await audit(req, action, ctx.resource, result, ctx.detail).catch((auditErr) => {
+        // A DB failure was already logged inside audit(); this also catches anything else.
+        logger.error({ kind: "security", err: auditErr, action, request_id: req.id }, "error-path audit failed");
+      });
       throw err;
     }
     reply.body === undefined ? res.status(reply.status).end() : res.status(reply.status).json(reply.body);

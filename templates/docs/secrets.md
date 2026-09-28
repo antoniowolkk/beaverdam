@@ -4,11 +4,11 @@ Names, owners, and rotation steps for every secret this backend uses. **Never va
 
 Update this file in the same change that adds, removes, or renames a secret. See `.beaverdam/skills/secrets-handling.md`.
 
-| Name | Purpose | Where it lives | Environments | Permissions it grants | Rotated by | How to rotate | What restarts or redeploys |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `DATABASE_URL` | App connection to Postgres (as `app_user`) | <...> | dev, staging, prod (separate values) | read/write app tables, insert-only audit log | <name> | <steps> | <app> |
-| `SESSION_SECRET` | Signs session cookies | <...> | <...> | forging a session if leaked | <name> | <steps; all users signed out> | <app> |
-| `<NAME>` | <...> | <...> | <...> | <...> | <...> | <...> | <...> |
+| Name | Purpose | Where it lives | Environments | Permissions it grants | Rotated by | How to rotate | What restarts or redeploys | Expires | Last rotated |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `DATABASE_URL` | App connection to Postgres (as `app_user`) | <...> | dev, staging, prod (separate values) | read/write app tables, insert-only audit log | <name> | <steps> | <app> | <date, or "none: reason"> | <date> |
+| `SESSION_SECRET` | Signs session cookies | <...> | <...> | forging a session if leaked | <name> | <steps; all users signed out> | <app> | <date, or "none: reason"> | <date> |
+| `<NAME>` | <...> | <...> | <...> | <...> | <...> | <...> | <...> | <...> | <...> |
 
 ## If a secret leaks
 
