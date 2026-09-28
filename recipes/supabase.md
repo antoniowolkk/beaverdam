@@ -8,7 +8,7 @@ Installing anything, linking a remote project, `supabase db push`, `supabase fun
 
 ## What is proven, and what is not
 
-The complete migration in this recipe is `examples/supabase-sql-check/migration.sql`. The SQL excerpts below are copied from it. It was run against real Postgres 18.4 with a stub for Supabase's roles and `auth` schema (`supabase-stub.sql`), and passes 44 checks: RLS isolation, column grants, constraints, audit rows, denial audits that survive commit, role-change rules, the rate limiter, the quota RPC, the section 13 spine queries, the section 15 inventory and signal queries, and 20 parallel quota calls (section 12). Four deliberate breakages (default grants left on, `raise` instead of `return`, unpinned `search_path`, `using (true)`) were each caught.
+The complete migration in this recipe is `examples/supabase-sql-check/migration.sql`. The SQL excerpts below are copied from it. It was run against real Postgres 18.4 with a stub for Supabase's roles and `auth` schema (`supabase-stub.sql`), and passes 49 checks: RLS isolation, column grants, constraints, audit rows, denial audits that survive commit, role-change rules, the rate limiter, the quota RPC, the section 13 spine queries, the section 15 inventory and signal queries, and concurrency checks: 20 parallel quota calls, 20 parallel pairs of owners demoting each other, and a double delete (sections 8 and 12). It also checks that the pre-request hook can be called as `anon`, and that `anon` can execute nothing else in `private`. Four deliberate breakages (default grants left on, `raise` instead of `return`, unpinned `search_path`, `using (true)`) were each caught.
 
 Not proven here, because the Supabase CLI needs Docker and none was available: PostgREST behaviour (the pre-request hook registration, error responses, `request.*` settings as PostgREST sets them), Supabase Auth settings, Edge Functions, Storage policies, Realtime, pgTAP via `supabase test db`, and `supabase db lint`. Those sections are written from the Supabase and PostgREST docs and are marked **unproven**. Prove them on the first real project and update this line.
 
@@ -137,7 +137,7 @@ Deny by default. Row Level Security on every table in an exposed schema, Supabas
 ```sql
 create schema if not exists private;
 revoke all on schema private from public;
-grant usage on schema private to authenticated; -- RLS policies call private.has_permission()
+grant usage on schema private to anon, authenticated; -- RLS policies call private.has_permission(); the pre-request hook runs as anon too. No private table is granted to either.
 ```
 
 **Role model.** Memberships link users to orgs with a role. The role matrix from `docs/prd.md` is a table.
@@ -455,7 +455,8 @@ as $$
 declare
   v_org uuid;
 begin
-  select org_id into v_org from public.invoices where id = p_id;
+  -- for update: a second delete of the same invoice waits, then finds it gone and is denied.
+  select org_id into v_org from public.invoices where id = p_id for update;
   if v_org is null or not private.has_permission(v_org, 'invoice.delete') then
     -- Return, do not raise: an exception would roll back this audit row.
     perform private.audit('invoice.delete', 'invoice', p_id::text, 'denied');
@@ -473,7 +474,7 @@ grant execute on function public.delete_invoice(uuid) to authenticated;
 
 **Revoke `execute` from `public` and `anon` on every function.** Postgres grants `execute` to `PUBLIC` by default, and Supabase grants functions in `public` to `anon` and `authenticated`. A `security definer` function left executable by `anon` is an unauthenticated back door.
 
-Role changes follow the same shape and enforce the rules in `skills/rbac.md`: owners only, the last owner cannot be demoted, every attempt audited with old and new role.
+Role changes follow the same shape and enforce the rules in `skills/rbac.md`: owners only, the last owner cannot be demoted, every attempt audited with old and new role. The harness also runs these under concurrency. Before the org-row lock, 20 of 20 pairs of owners demoting each other at once left an org with no owner. Before the `for update` in `delete_invoice`, a double delete returned `true` twice with one audit row. Both are caught now, and both breaks were re-checked.
 
 ```sql
 create function public.change_member_role(p_org uuid, p_user uuid, p_role public.app_role)
@@ -485,6 +486,9 @@ declare
   v_owners integer;
   v_res    text := p_org::text || ':' || p_user::text;
 begin
+  -- One role change per org at a time, so the owner count below cannot go stale.
+  -- Locking the owner rows instead would deadlock two owners demoting each other.
+  perform 1 from public.orgs where id = p_org for update;
   select role into v_old from public.memberships where org_id = p_org and user_id = p_user for update;
   if v_old is null or not private.has_permission(p_org, 'member.role_change') then
     perform private.audit('member.role_change', 'membership', v_res, 'denied');
@@ -645,7 +649,7 @@ create policy invoice_files_upload on storage.objects
 
 ## 13. Tests
 
-**Without Docker:** `examples/supabase-sql-check/` runs the migration on a throwaway Postgres with a stub of Supabase's roles and `auth.uid()`, then runs 45 checks as `anon` and `authenticated`, the way PostgREST would. Copy its structure for a project's own migration.
+**Without Docker:** `examples/supabase-sql-check/` runs the migration on a throwaway Postgres with a stub of Supabase's roles and `auth.uid()`, then runs 49 checks as `anon` and `authenticated`, the way PostgREST would. Copy its structure for a project's own migration.
 
 **In a project,** pgTAP under `supabase/tests/`, run with `supabase test db` (**unproven here**). Act as a user by setting the role and claims inside the test transaction:
 

@@ -169,6 +169,38 @@ try {
   const granted = burst.filter((b) => b.out?.rows[0].ok === true).length;
   ok(granted === 10 && burst.every((b) => !b.err), "concurrent take_quota: exactly 10 of 20 parallel calls succeed (no check-then-write race)", `granted ${granted}`);
 
+  // --- concurrency: two owners demoting each other at once must leave one owner (recipe section 8) ---
+  const wide2 = new pg.Pool({ connectionString: `postgres://postgres:postgres@localhost:${PORT}/supa`, max: 20 });
+  let orphaned = 0, bothWon = 0;
+  for (let i = 0; i < 20; i++) {
+    const [o1, o2] = [randomUUID(), randomUUID()];
+    for (const u of [o1, o2]) await pool.query("insert into auth.users (id, email) values ($1, $2)", [u, u + "@example.test"]);
+    const org = (await pool.query("insert into public.orgs (name) values ('race') returning id")).rows[0].id;
+    await pool.query("insert into public.memberships values ($1,$3,'owner'),($2,$3,'owner')", [o1, o2, org]);
+    const res = await Promise.all([
+      as(o1, q("select public.change_member_role($1,$2,'member') as ok", [org, o2]), { via: wide2 }),
+      as(o2, q("select public.change_member_role($1,$2,'member') as ok", [org, o1]), { via: wide2 }),
+    ]);
+    if (res.every((x) => x.out?.rows[0].ok === true)) bothWon++;
+    if ((await pool.query("select 1 from public.memberships where org_id = $1 and role = 'owner'", [org])).rowCount === 0) orphaned++;
+  }
+  ok(orphaned === 0 && bothWon === 0, "concurrent mutual owner demotion: every org keeps an owner (20 parallel pairs)", `orphaned ${orphaned}, both succeeded ${bothWon}`);
+
+  // --- concurrency: the same invoice deleted twice at once succeeds once (recipe section 8) ---
+  const invRace = (await pool.query("insert into public.invoices (org_id, customer_id, amount_cents, currency, created_by) values ($1, gen_random_uuid(), 1000, 'EUR', $2) returning id", [orgA, uAdmin])).rows[0].id;
+  const dels = await Promise.all([0, 1].map(() => as(uAdmin, q("select public.delete_invoice($1) as ok", [invRace]), { via: wide2 })));
+  await wide2.end();
+  const wins = dels.filter((d) => d.out?.rows[0].ok === true).length;
+  const delAudit = (await pool.query("select result from private.audit_log where action = 'invoice.delete' and resource_id = $1 order by result", [invRace])).rows.map((row) => row.result);
+  ok(wins === 1 && JSON.stringify(delAudit) === JSON.stringify(["denied", "success"]), "concurrent double delete: one true, one audited false", `true ${wins}×, audit ${delAudit.join(",")}`);
+
+  // --- the pre-request hook runs for anon, not only authenticated (recipe section 6) ---
+  r = await as(null, q("select private.check_request()"), { role: "anon" });
+  ok(!r.err, "pre-request hook is callable as anon", r.err?.message);
+  const anonPrivate = (await pool.query(`select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'private' and has_function_privilege('anon', p.oid, 'execute') order by 1`)).rows.map((row) => row.proname);
+  ok(JSON.stringify(anonPrivate) === JSON.stringify(["check_request"]), "anon can execute only the hook in private", anonPrivate.join(", "));
+
   // --- security signals are countable from the audit log (recipe section 15) ---
   const signals = await pool.query(`
     select action, count(*)::int as denied from private.audit_log

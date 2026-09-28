@@ -1,7 +1,7 @@
 -- ============ 1. private schema: never in the Data API's exposed schemas ============
 create schema if not exists private;
 revoke all on schema private from public;
-grant usage on schema private to authenticated; -- RLS policies call private.has_permission()
+grant usage on schema private to anon, authenticated; -- RLS policies call private.has_permission(); the pre-request hook runs as anon too. No private table is granted to either.
 
 -- ============ 2. role model ============
 create type public.app_role as enum ('member', 'admin', 'owner');
@@ -169,7 +169,8 @@ as $$
 declare
   v_org uuid;
 begin
-  select org_id into v_org from public.invoices where id = p_id;
+  -- for update: a second delete of the same invoice waits, then finds it gone and is denied.
+  select org_id into v_org from public.invoices where id = p_id for update;
   if v_org is null or not private.has_permission(v_org, 'invoice.delete') then
     -- Return, do not raise: an exception would roll back this audit row.
     perform private.audit('invoice.delete', 'invoice', p_id::text, 'denied');
@@ -191,6 +192,9 @@ declare
   v_owners integer;
   v_res    text := p_org::text || ':' || p_user::text;
 begin
+  -- One role change per org at a time, so the owner count below cannot go stale.
+  -- Locking the owner rows instead would deadlock two owners demoting each other.
+  perform 1 from public.orgs where id = p_org for update;
   select role into v_old from public.memberships where org_id = p_org and user_id = p_user for update;
   if v_old is null or not private.has_permission(p_org, 'member.role_change') then
     perform private.audit('member.role_change', 'membership', v_res, 'denied');

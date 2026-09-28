@@ -4,7 +4,7 @@ How each part of the spine in `AGENTS.md` section 5 looks in a Node/Express back
 
 Code is TypeScript, ESM, Express 5. Where a pattern depends on which auth pattern the project's ADR picked, both are shown: keep one, delete the other.
 
-Installing any package below needs a yes first (`AGENTS.md` section 7). The versions below are the ones pattern A was last proven against in `examples/node-express-demo/` (type check + 23 integration tests on real Postgres, first 2026-09-24, last 2026-09-28). Pattern B (section 6) and the Redis store type-check but have not been run end to end. If a major has moved since, check the changelog for the APIs used here before copying code.
+Installing any package below needs a yes first (`AGENTS.md` section 7). The versions below are the ones pattern A was last proven against in `examples/node-express-demo/` (type check + 26 integration tests on real Postgres, first 2026-09-24, last 2026-09-28). Pattern B (section 6) and the Redis store type-check but have not been run end to end. If a major has moved since, check the changelog for the APIs used here before copying code.
 
 ## Stack
 
@@ -145,23 +145,24 @@ One logger. JSON with the field names from the audit schema. Redaction at the lo
 // src/logger.ts
 import pino from "pino";
 
+// `*.x` matches one level deep. Add a path when you add a nested secret-bearing field.
+// Every name in config.ts SECRET_NAMES must be here too (tests/integrity.test.ts checks it).
+export const REDACT_PATHS = [
+  "password", "*.password", "new_password", "*.new_password",
+  "token", "*.token", "refresh_token", "*.refresh_token", "access_token", "*.access_token",
+  "secret", "*.secret", "api_key", "*.api_key",
+  "DATABASE_URL", "*.DATABASE_URL", "SESSION_SECRET", "*.SESSION_SECRET", "REDIS_URL", "*.REDIS_URL",
+  "req.headers.authorization", "req.headers.cookie", "req.headers['x-csrf-token']",
+  "res.headers['set-cookie']",
+];
+
 export const logger = pino({
   level: process.env.LOG_LEVEL ?? "info",
   base: undefined, // no pid/hostname noise; the platform adds its own
   messageKey: "message",
   timestamp: () => `,"timestamp":"${new Date().toISOString()}"`,
   formatters: { level: (label) => ({ level: label }) },
-  redact: {
-    // `*.x` matches one level deep. Add a path when you add a nested secret-bearing field.
-    paths: [
-      "password", "*.password", "new_password", "*.new_password",
-      "token", "*.token", "refresh_token", "*.refresh_token", "access_token", "*.access_token",
-      "secret", "*.secret", "api_key", "*.api_key",
-      "req.headers.authorization", "req.headers.cookie", "req.headers['x-csrf-token']",
-      "res.headers['set-cookie']",
-    ],
-    censor: "[REDACTED]",
-  },
+  redact: { paths: REDACT_PATHS, censor: "[REDACTED]" },
 });
 ```
 
@@ -789,7 +790,9 @@ export async function audit(
     );
   } catch (err) {
     logger.error({ kind: "security", err, action, request_id: req.id }, "audit write failed");
-    if (MUST_PERSIST.has(action)) throw err;
+    // Inside a transaction the failed insert has aborted it: COMMIT would silently roll back
+    // while the client is told it worked. So fail the request, whatever the action.
+    if (opts.db || MUST_PERSIST.has(action)) throw err;
   }
 }
 
@@ -822,7 +825,10 @@ export function audited(
       });
     } catch (err) {
       const result = err instanceof AppError && err.status < 500 ? "denied" : "error";
-      await audit(req, action, ctx.resource, result, ctx.detail).catch(() => {}); // already logged inside audit()
+      await audit(req, action, ctx.resource, result, ctx.detail).catch((auditErr) => {
+        // A DB failure was already logged inside audit(); this also catches anything else.
+        logger.error({ kind: "security", err: auditErr, action, request_id: req.id }, "error-path audit failed");
+      });
       throw err;
     }
     reply.body === undefined ? res.status(reply.status).end() : res.status(reply.status).json(reply.body);
@@ -1212,6 +1218,67 @@ describe("no secrets in responses", () => {
 
 Also assert that unknown fields are rejected (`{ ...valid, role: "owner" }` → 400) on every create and update endpoint. That is the mass-assignment test.
 
+**Audit failure and redaction.** A failed audit insert inside `audited()` fails the request with a 500 and stores nothing. Without that rule, Postgres turns the later `COMMIT` of the aborted transaction into a silent rollback, and the client gets a 201 for a row that does not exist. The demo showed exactly that before the fix. The redaction test fails as soon as a secret is added to `SECRET_NAMES` but not to `REDACT_PATHS`. Both were broken once and caught.
+
+```ts
+// tests/integrity.test.ts
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
+import pino from "pino";
+import { pool } from "../src/db.js";
+import { logger, REDACT_PATHS } from "../src/logger.js";
+import { SECRET_NAMES } from "../src/config.js";
+import { loginAs, owner, resetDb } from "./helpers.js";
+
+beforeEach(resetDb);
+afterAll(async () => {
+  await pool.end();
+  await owner.end();
+});
+
+describe("audit write fails inside the handler's transaction", () => {
+  beforeEach(async () => {
+    // Owner-only test hook: make the audit insert for invoice.create fail, as a full disk or a bad column would.
+    await owner.query(`CREATE FUNCTION fail_create_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.action = 'invoice.create' THEN RAISE EXCEPTION 'audit write refused (test)'; END IF; RETURN NEW; END $$`);
+    await owner.query(`CREATE TRIGGER fail_create_audit BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION fail_create_audit()`);
+  });
+  afterEach(async () => {
+    await owner.query(`DROP TRIGGER IF EXISTS fail_create_audit ON audit_log`);
+    await owner.query(`DROP FUNCTION IF EXISTS fail_create_audit()`);
+    vi.restoreAllMocks();
+  });
+
+  it("the request fails, nothing is stored, and the failure is logged", async () => {
+    const errors = vi.spyOn(logger, "error");
+    const { agent, csrf, user } = await loginAs("member");
+    const res = await agent.post("/invoices").set("x-csrf-token", csrf)
+      .send({ customer_id: "3f2c6b1e-8a4d-4c2b-9f1a-2b7e5d9c0a11", amount_cents: 1999, currency: "EUR" });
+
+    expect(res.status).toBe(500);
+    expect((await owner.query(`SELECT 1 FROM invoices WHERE org_id = $1`, [user.org_id])).rowCount).toBe(0);
+    expect(errors.mock.calls.some((c) => c[1] === "audit write failed")).toBe(true);
+  });
+});
+
+describe("logger redaction", () => {
+  it("covers every secret name, top level and one level deep", () => {
+    for (const name of SECRET_NAMES) {
+      expect(REDACT_PATHS).toContain(name);
+      expect(REDACT_PATHS).toContain(`*.${name}`);
+    }
+  });
+
+  it("a logged config object prints no secret value", () => {
+    const lines: string[] = [];
+    const log = pino({ redact: { paths: REDACT_PATHS, censor: "[REDACTED]" } }, { write: (l: string) => void lines.push(l) });
+    const fake = Object.fromEntries(SECRET_NAMES.map((n) => [n, `value-of-${n}`]));
+    log.info(fake);
+    log.info({ config: fake });
+    expect(lines.join("")).not.toMatch(/value-of-/);
+  });
+});
+```
+
 ## 14. Checks before merge
 
 The pre-merge checklist in `AGENTS.md` section 6, as commands for this stack. Each should print nothing. Paste the output in the report.
@@ -1251,6 +1318,12 @@ grep -rnE "catch[[:space:]]*(\([^)]*\))?[[:space:]]*\{[[:space:]]*\}" src
 ```
 
 Empty catch blocks.
+
+```bash
+grep -rnE "\.catch\([[:space:]]*\(?[^)]*\)?[[:space:]]*=>[[:space:]]*(\{[[:space:]]*\}|undefined|null|void 0)[[:space:]]*\)" src
+```
+
+Promise `.catch` handlers that swallow the error (`.catch(() => {})`). The first grep does not see these.
 
 ```bash
 grep -rnE "app\.use\([[:space:]]*['\"]/" src

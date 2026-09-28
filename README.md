@@ -62,8 +62,8 @@ Using junior-agent too? Use beaverdam's `AGENTS.md` as the project file instead 
 | `recipes/node-express.md` | Spine → Node/Express + Postgres code. |
 | `recipes/supabase.md` | Spine → Supabase RLS, policies, edge functions. |
 | `recipes/python-fastapi.md` | Spine → FastAPI code. Added when a project needs it. |
-| `examples/supabase-sql-check/` | The Supabase recipe's full migration, run on a throwaway Postgres with a stub of Supabase's roles and `auth` schema. 45 checks, no Docker needed. |
-| `examples/node-express-demo/` | Pattern A (session + CSRF) built from the Node recipe: 23 integration tests against a throwaway Postgres. The proof the recipe works. |
+| `examples/supabase-sql-check/` | The Supabase recipe's full migration, run on a throwaway Postgres with a stub of Supabase's roles and `auth` schema. 49 checks, no Docker needed. |
+| `examples/node-express-demo/` | Pattern A (session + CSRF) built from the Node recipe: 26 integration tests against a throwaway Postgres. The proof the recipe works. |
 | `LICENSE` | MIT. |
 
 Recipes are additive. A new stack is a new file; the core never changes to fit one. No recipe for your stack yet? The agent follows the abstract rule in `skills/` and asks before writing any auth, secrets, or RBAC pattern. Those three are never improvised.

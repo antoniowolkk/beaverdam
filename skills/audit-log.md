@@ -51,7 +51,7 @@ Reads are not audited by default. Reads of sensitive data (exports, admin viewin
 - **Never log:** passwords, tokens, session ids, full card numbers, secrets, request bodies wholesale, or personal data beyond an id.
 - **Tamper resistance.** If audit entries go to a database table, the app's database role may insert but not update or delete them. Retention period documented in an ADR.
 - **Same transaction where possible.** For DB-backed audit entries on transactional writes, write the entry in the same transaction as the change, so a rollback removes both.
-- **Audit write failure** is logged as an error at `kind: security`. For sensitive actions (payments, role changes, deletes) the action fails if its audit entry cannot be written.
+- **Audit write failure** is logged as an error at `kind: security`. For sensitive actions (payments, role changes, deletes) the action fails if its audit entry cannot be written. So does any write whose audit entry shares its transaction: the failed insert aborts the transaction, and reporting success would hide a rolled-back write.
 
 ## Steps
 
