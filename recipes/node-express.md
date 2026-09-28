@@ -4,7 +4,7 @@ How each part of the spine in `AGENTS.md` section 5 looks in a Node/Express back
 
 Code is TypeScript, ESM, Express 5. Where a pattern depends on which auth pattern the project's ADR picked, both are shown: keep one, delete the other.
 
-Installing any package below needs a yes first (`AGENTS.md` section 7). The versions below are the ones pattern A was last proven against in `examples/node-express-demo/` (type check + 21 integration tests on real Postgres, first 2026-09-24, last 2026-09-28). Pattern B (section 6) and the Redis store type-check but have not been run end to end. If a major has moved since, check the changelog for the APIs used here before copying code.
+Installing any package below needs a yes first (`AGENTS.md` section 7). The versions below are the ones pattern A was last proven against in `examples/node-express-demo/` (type check + 23 integration tests on real Postgres, first 2026-09-24, last 2026-09-28). Pattern B (section 6) and the Redis store type-check but have not been run end to end. If a major has moved since, check the changelog for the APIs used here before copying code.
 
 ## Stack
 
@@ -69,7 +69,8 @@ Suggested `package.json` scripts. The project's real scripts win; update section
 | Lint | `npx eslint .` |
 | Type check | `npx tsc --noEmit` |
 | New migration (write only) | `npx node-pg-migrate create <name> --migration-file-language sql` |
-| Secret scan | `gitleaks protect --staged` (newer gitleaks: `gitleaks git --staged`; check `gitleaks --help`) |
+| Secret scan (staged) | `gitleaks git --staged` (checked on gitleaks 8.30.1; older versions: `gitleaks protect --staged`) |
+| Secret scan (full history) | `gitleaks git --log-opts="--all"` (checked on 8.30.1: scans every commit on every branch) |
 
 ---
 
@@ -424,6 +425,41 @@ CREATE INDEX session_expire_idx ON session (expire);
 
 Login and logout are in section 9, because they use `audited()`.
 
+**CORS (pattern A).** Same site, so no CORS middleware and no `Access-Control-*` headers. Browsers then refuse to let any other origin read a response. The test pins that down, so a CORS package added later without an ADR fails it. Checked in the demo: a middleware that echoes back `Origin` with `credentials` makes both cases fail.
+
+```ts
+// tests/cors.test.ts
+import { describe, it, expect, afterAll } from "vitest";
+import request from "supertest";
+import { app } from "../src/app.js";
+import { pool } from "../src/db.js";
+import { owner } from "./helpers.js";
+import { ORIGIN } from "./db-urls.js";
+
+afterAll(async () => {
+  await pool.end();
+  await owner.end();
+});
+
+// Pattern A is same-site: the API sends no CORS headers at all, so a browser on
+// another origin can never read a response, with or without credentials.
+describe("CORS (pattern A)", () => {
+  for (const origin of ["https://evil.example", ORIGIN]) {
+    it(`no Access-Control-* headers for Origin ${origin}`, async () => {
+      const get = await request(app).get("/health/live").set("Origin", origin);
+      const preflight = await request(app)
+        .options("/invoices")
+        .set("Origin", origin)
+        .set("Access-Control-Request-Method", "POST")
+        .set("Access-Control-Request-Headers", "content-type, x-csrf-token");
+      for (const res of [get, preflight]) {
+        expect(Object.keys(res.headers).filter((h) => h.startsWith("access-control-"))).toEqual([]);
+      }
+    });
+  }
+});
+```
+
 ## 6. Auth, pattern B: access token + refresh token → `skills/auth-spine.md`
 
 ```ts
@@ -545,7 +581,7 @@ res.cookie("rt", token, {
 });
 ```
 
-Pattern B with a browser frontend on another origin needs CORS with an explicit origin list (`cors({ origin: config.ALLOWED_ORIGINS, credentials: true })`). Adding or changing CORS needs an ADR (`AGENTS.md` section 7).
+Pattern B with a browser frontend on another origin needs CORS with an explicit origin list (`cors({ origin: config.ALLOWED_ORIGINS, credentials: true })`). Never `origin: "*"`, `origin: true` (which echoes back any origin), or a regex. Test that a listed origin gets `Access-Control-Allow-Origin` and a foreign one does not (**unproven**: the demo is pattern A and has no `cors` package). Adding or changing CORS needs an ADR (`AGENTS.md` section 7).
 
 ## 7. Passwords (both patterns) → `skills/auth-spine.md`
 
@@ -1019,9 +1055,11 @@ app.use(notFound);                            // 8. unknown routes → 404 via t
 app.use(errorHandler);                        // 9. last
 ```
 
-## 12. Transactional extras → `skills/backend-shape.md`
+## 12. Transactional extras → `skills/backend-shape.md` (unproven)
 
-Only when the backend shape is transactional.
+Only when the backend shape is transactional. None of this section runs in `examples/node-express-demo/`: it has not been type-checked or tested. The check-then-write rule below it holds for every shape.
+
+**No check-then-write on shared state (every shape).** Never `SELECT` a balance, stock count, or usage counter, check it in TypeScript, then `UPDATE` it. Two requests both pass the check. Put the check in the write (`UPDATE items SET stock = stock - 1 WHERE id = $1 AND stock > 0 RETURNING stock`, zero rows means sold out), use `INSERT … ON CONFLICT`, or take `SELECT … FOR UPDATE` inside `withTx`. Test it with parallel requests (`Promise.all` of 20 supertest calls), because a one-at-a-time test passes on the broken version. That was shown in `examples/supabase-sql-check`: a read-sleep-write quota passed the sequential test and granted 20 of 20 in parallel. The Node demo has no shared counter to test this on.
 
 **Idempotency keys** on every write that moves money or stock. The client sends `Idempotency-Key: <uuid>`; a repeat of the same key returns the first response instead of doing the work twice.
 
@@ -1219,6 +1257,12 @@ grep -rnE "app\.use\([[:space:]]*['\"]/" src
 ```
 
 Routers mounted with `app.use` instead of `mount()`. The inventory test also throws on these.
+
+```bash
+grep -rnE "Access-Control-Allow-Origin|origin:[[:space:]]*(['\"]\*['\"]|true)" src
+```
+
+CORS set by hand, a wildcard, or echoing back any origin.
 
 Plus: type check passes (enforces `audited()` on write routes), full test suite passes (includes the inventory test, section 15), secret scan passes.
 

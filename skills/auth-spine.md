@@ -42,6 +42,19 @@ Best for: mobile apps, third-party clients, or an API on a different site from t
 - **Rate limits:** login, signup, reset, and refresh are rate limited per `rate-limit.md`.
 - **Audit:** login success, login failure, logout, password change, reset request, reset completion, and refresh-token reuse each write an audit entry per `audit-log.md`. Never log the password or the token.
 - **Verification of identity happens server-side on every request.** A user id in the request body, query, or a client-set header is never trusted as identity.
+- **CORS:** pattern A on one site sends no CORS headers at all. Anything that must be read cross-origin gets an explicit list of allowed origins from config, recorded in ADR 0001. Never `*`, and never echo back the request's `Origin` (the same as `*`), on any route that reads a cookie or an `Authorization` header. `credentials: true` only with the explicit list. The one exception is a public, unauthenticated GET that reads no cookie, and it needs an ADR.
+
+## API keys for machine callers
+
+Only once an ADR has approved them. The ADR records each of these:
+
+- **Shown once, stored hashed.** The server keeps a hash (SHA-256 is enough for 128+ bit random keys), never the key. A short non-secret prefix (`bd_live_ab12…`) identifies a key in logs and in a leak report.
+- **Scoped** to the permissions that caller needs, checked by the same `rbac.md` rules as users (`actor.type: service`).
+- **Expires.** Default maximum lifetime 90 days (a guess, not measured; set it in ADR 0001). No key without an expiry.
+- **Revocable at once,** server-side, without a deploy.
+- **Rotation without downtime:** a caller may hold two active keys while switching.
+- **Last-used time** recorded, so unused keys can be found and revoked.
+- Creating, rotating, and revoking a key each write an audit entry. Rate limited per key.
 
 ## Flag before writing
 
@@ -51,6 +64,8 @@ Best for: mobile apps, third-party clients, or an API on a different site from t
 - Auth checked in the frontend only.
 - A "skip auth in dev" flag, test user, or master password that could reach production.
 - Hand-rolled crypto, token generation with a non-cryptographic random, or string comparison of secrets that is not constant-time.
+- CORS with `origin: "*"`, `origin: true`, an origin regex, or `Access-Control-Allow-Origin` set by hand from the request.
+- An API key stored in plain text, with no expiry, or with no way to revoke it.
 
 ## Done when
 
@@ -58,5 +73,7 @@ Best for: mobile apps, third-party clients, or an API on a different site from t
 - [ ] Tests: valid credentials, wrong password, unknown user (same response), expired session or token, revoked session or token, CSRF missing (pattern A), refresh reuse (pattern B)
 - [ ] Auth endpoints rate limited and audited
 - [ ] No token, session id, or password in any log line (checked, not assumed)
+- [ ] CORS test: no `Access-Control-*` headers for a foreign origin (pattern A), or only the listed origins get them
+- [ ] If API keys exist: hashed, scoped, expiring, revocable, audited, per the ADR
 
 `AGENTS.md` section 7 outranks this doc wherever they disagree. Changing the auth pattern always needs an ADR and approval.

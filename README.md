@@ -61,8 +61,8 @@ Using junior-agent too? Use beaverdam's `AGENTS.md` as the project file instead 
 | `recipes/node-express.md` | Spine → Node/Express + Postgres code. |
 | `recipes/supabase.md` | Spine → Supabase RLS, policies, edge functions. |
 | `recipes/python-fastapi.md` | Spine → FastAPI code. Added when a project needs it. |
-| `examples/supabase-sql-check/` | The Supabase recipe's full migration, run on a throwaway Postgres with a stub of Supabase's roles and `auth` schema. 44 checks, no Docker needed. |
-| `examples/node-express-demo/` | Pattern A (session + CSRF) built from the Node recipe: 21 integration tests against a throwaway Postgres. The proof the recipe works. |
+| `examples/supabase-sql-check/` | The Supabase recipe's full migration, run on a throwaway Postgres with a stub of Supabase's roles and `auth` schema. 45 checks, no Docker needed. |
+| `examples/node-express-demo/` | Pattern A (session + CSRF) built from the Node recipe: 23 integration tests against a throwaway Postgres. The proof the recipe works. |
 | `LICENSE` | MIT. |
 
 Recipes are additive. A new stack is a new file; the core never changes to fit one. No recipe for your stack yet? The agent follows the abstract rule in `skills/` and asks before writing any auth, secrets, or RBAC pattern. Those three are never improvised.
@@ -114,6 +114,7 @@ Recipes go stale as frameworks version. When a project surfaces drift between a 
 
 - [ ] No `<...>` placeholders left in `AGENTS.md`
 - [ ] Every command in section 4 actually runs, including the secret scan
+- [ ] Full-history secret scan run once, output read
 - [ ] `docs/prd.md` filled in by a human, with the role model
 - [ ] Backend shape set in section 1
 - [ ] `docs/threat-model.md` written and read

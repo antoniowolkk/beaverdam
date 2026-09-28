@@ -18,8 +18,8 @@ try {
   ok(true, "migration applies cleanly on Postgres " + (await pool.query("show server_version")).rows[0].server_version);
 
   // Run fn as an API caller, like PostgREST does: set claims + role inside a transaction.
-  async function as(sub, fn, { role = "authenticated", method = "POST" } = {}) {
-    const c = await pool.connect();
+  async function as(sub, fn, { role = "authenticated", method = "POST", via = pool } = {}) {
+    const c = await via.connect();
     try {
       await c.query("begin");
       await c.query("select set_config('request.jwt.claims', $1, true), set_config('request.method', $2, true), set_config('request.path', '/rest/v1/rpc', true), set_config('request.headers', $3, true)",
@@ -161,6 +161,13 @@ try {
   ok(r.out?.rows[0].ok === false, "unknown quota bucket denies");
   r = await as(null, q("select public.take_quota('export')"), { role: "anon" });
   ok(r.err?.code === "42501", "anon cannot take quota", r.err?.code);
+
+  // --- concurrency (recipe section 12): 20 simultaneous takes on separate connections, still exactly 10 succeed ---
+  const wide = new pg.Pool({ connectionString: `postgres://postgres:postgres@localhost:${PORT}/supa`, max: 20 });
+  const burst = await Promise.all(Array.from({ length: 20 }, () => as(uOther, q("select public.take_quota('export') as ok"), { via: wide })));
+  await wide.end();
+  const granted = burst.filter((b) => b.out?.rows[0].ok === true).length;
+  ok(granted === 10 && burst.every((b) => !b.err), "concurrent take_quota: exactly 10 of 20 parallel calls succeed (no check-then-write race)", `granted ${granted}`);
 
   // --- security signals are countable from the audit log (recipe section 15) ---
   const signals = await pool.query(`

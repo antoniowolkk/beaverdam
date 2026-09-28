@@ -40,6 +40,7 @@ A backend can be more than one. Name every shape that applies and which endpoint
 
 | Shape | Extra emphasis | Extra guidance |
 | --- | --- | --- |
+| Every shape | No check-then-write on shared state (a balance, stock, seats, a usage cap, a unique name). Change it with one atomic statement (`UPDATE … WHERE stock > 0`, `INSERT … ON CONFLICT`), a row lock (`SELECT … FOR UPDATE`) inside a transaction, or a unique constraint. Test it with parallel requests: a one-at-a-time test passes on the broken version. | Reading a value, checking it in app code, then writing it back is the bug, even inside a transaction at the default isolation level. |
 | CRUD | Ownership checks on every record route (`rbac.md`). | Pagination on list endpoints. |
 | Transactional | Idempotency keys on every money or stock write. DB transaction around multi-step writes. Audit every attempt, including failures. | Outbox pattern: write the side effect (email, webhook, payment call) to a table in the same transaction, send it from a worker. Never call a payment provider inside a DB transaction. |
 | Analytics | Exports are rate limited and audited as data exports. Queries bounded (date range, row cap). | Read replica or cache for heavy reads, not write-path hardening. |

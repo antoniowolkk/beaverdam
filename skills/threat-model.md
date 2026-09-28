@@ -20,6 +20,7 @@ Keep it to one page. A threat model nobody rereads protects nothing.
    - Can someone reach data that is not theirs? (ownership, IDOR)
    - Can someone send input that does something unintended? (validation, injection, mass assignment)
    - Can someone overwhelm or abuse it? (rate limit, cost)
+   - What if two of these arrive at once? (check-then-write races, double spend, overbooking — `backend-shape.md`)
 6. **Name the worst case.** For each sensitive data type: if it leaked tomorrow, what happens, and to whom.
 7. **Map each risk to the spine.** Every risk points at the skill that closes it. A risk with no skill to point at goes to the human as an open question.
 8. **Write `docs/threat-model.md`** in the format below. Show it to the human before building.

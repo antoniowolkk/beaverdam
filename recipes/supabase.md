@@ -8,7 +8,7 @@ Installing anything, linking a remote project, `supabase db push`, `supabase fun
 
 ## What is proven, and what is not
 
-The complete migration in this recipe is `examples/supabase-sql-check/migration.sql`. The SQL excerpts below are copied from it. It was run against real Postgres 18.4 with a stub for Supabase's roles and `auth` schema (`supabase-stub.sql`), and passes 44 checks: RLS isolation, column grants, constraints, audit rows, denial audits that survive commit, role-change rules, the rate limiter, the quota RPC, the section 13 spine queries, and the section 15 inventory and signal queries. Four deliberate breakages (default grants left on, `raise` instead of `return`, unpinned `search_path`, `using (true)`) were each caught.
+The complete migration in this recipe is `examples/supabase-sql-check/migration.sql`. The SQL excerpts below are copied from it. It was run against real Postgres 18.4 with a stub for Supabase's roles and `auth` schema (`supabase-stub.sql`), and passes 44 checks: RLS isolation, column grants, constraints, audit rows, denial audits that survive commit, role-change rules, the rate limiter, the quota RPC, the section 13 spine queries, the section 15 inventory and signal queries, and 20 parallel quota calls (section 12). Four deliberate breakages (default grants left on, `raise` instead of `return`, unpinned `search_path`, `using (true)`) were each caught.
 
 Not proven here, because the Supabase CLI needs Docker and none was available: PostgREST behaviour (the pre-request hook registration, error responses, `request.*` settings as PostgREST sets them), Supabase Auth settings, Edge Functions, Storage policies, Realtime, pgTAP via `supabase test db`, and `supabase db lint`. Those sections are written from the Supabase and PostgREST docs and are marked **unproven**. Prove them on the first real project and update this line.
 
@@ -63,7 +63,8 @@ Where things go:
 | Generate types | `supabase gen types typescript --local > src/types/database.ts` |
 | Serve functions locally | `supabase functions serve --env-file supabase/functions/.env` |
 | Spine SQL check without Docker | `cd examples/supabase-sql-check && npm install && npm test` |
-| Secret scan | `gitleaks protect --staged` (newer gitleaks: `gitleaks git --staged`) |
+| Secret scan (staged) | `gitleaks git --staged` (checked on gitleaks 8.30.1; older versions: `gitleaks protect --staged`) |
+| Secret scan (full history) | `gitleaks git --log-opts="--all"` (checked on 8.30.1: scans every commit on every branch) |
 
 Never without a yes: `supabase link`, `supabase db push`, `supabase functions deploy`, `supabase secrets set`, anything with `--db-url` pointing at a remote database.
 
@@ -528,6 +529,26 @@ export function newRequest() {
 }
 ```
 
+**CORS.** A browser calling a function from another origin needs CORS headers. Many examples use `"access-control-allow-origin": "*"`. Not here: these functions read the `Authorization` header, so only listed origins get headers.
+
+```ts
+// supabase/functions/_shared/cors.ts
+const ALLOWED = (Deno.env.get("ALLOWED_ORIGINS") ?? "").split(",").map((o) => o.trim()).filter(Boolean);
+
+export function cors(req: Request): Record<string, string> {
+  const origin = req.headers.get("origin");
+  if (!origin || !ALLOWED.includes(origin)) return {}; // unlisted: no headers, the browser blocks the read
+  return {
+    "access-control-allow-origin": origin, // echoed only after the allowlist check
+    "access-control-allow-headers": "authorization, content-type, apikey, x-client-info, x-request-id",
+    "access-control-allow-methods": "POST, OPTIONS",
+    vary: "Origin",
+  };
+}
+```
+
+Answer the preflight first (`if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(req) });`) and add `...cors(req)` to the headers in `reply()`. `ALLOWED_ORIGINS` is config, not a secret, and matches ADR 0001.
+
 ```ts
 // supabase/functions/send-invoice/index.ts
 import { createClient } from "npm:@supabase/supabase-js@2";
@@ -616,6 +637,7 @@ create policy invoice_files_upload on storage.objects
 
 ## 12. Backend-shape extras → `skills/backend-shape.md`
 
+- **Every shape, no check-then-write:** shared counters change in one statement. `private.hit()` (section 6) is one `insert … on conflict do update … returning`, and the harness fires 20 `take_quota` calls in parallel on separate connections and gets exactly 10. The broken version, which does `select`, then check, then `update`, passed the sequential quota test and granted 20 of 20 in parallel. Test shared-state RPCs in parallel, not one call at a time.
 - **Transactional:** an RPC function is one transaction, so multi-step writes go in one RPC. Idempotency: an `idempotency_keys` table with `primary key (user_id, key)`, checked and written inside the same RPC (same flow as the Node recipe, section 12). Outbox: insert into an outbox table (or a Supabase Queue, which is `pgmq`) inside the RPC; an Edge Function on a schedule drains it. Never call a payment provider from inside a database function.
 - **Analytics:** reporting views with `security_invoker = true`, read through an RPC that takes the `export` quota and writes a `data.export` audit row. Heavy reads go to a read replica if the plan has one.
 - **Real-time:** section 11.
@@ -623,7 +645,7 @@ create policy invoice_files_upload on storage.objects
 
 ## 13. Tests
 
-**Without Docker:** `examples/supabase-sql-check/` runs the migration on a throwaway Postgres with a stub of Supabase's roles and `auth.uid()`, then runs 44 checks as `anon` and `authenticated`, the way PostgREST would. Copy its structure for a project's own migration.
+**Without Docker:** `examples/supabase-sql-check/` runs the migration on a throwaway Postgres with a stub of Supabase's roles and `auth.uid()`, then runs 45 checks as `anon` and `authenticated`, the way PostgREST would. Copy its structure for a project's own migration.
 
 **In a project,** pgTAP under `supabase/tests/`, run with `supabase test db` (**unproven here**). Act as a user by setting the role and claims inside the test transaction:
 

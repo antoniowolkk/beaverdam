@@ -75,7 +75,8 @@ Use these exact commands. Do not invent alternatives.
 | Lint | `<...>` |
 | Type check | `<...>` |
 | New migration (write only) | `<...>` |
-| Secret scan (staged changes) | `<e.g. gitleaks protect --staged>` |
+| Secret scan (staged changes) | `<e.g. gitleaks git --staged>` |
+| Secret scan (full history) | `<e.g. gitleaks git --log-opts="--all">`. On setup, before the repo is made public or shared, and on a schedule in CI |
 
 A change is not done until lint, type check, the full test suite, and the secret scan pass.
 
@@ -89,12 +90,15 @@ Every backend gets all eight, from the first endpoint. Not "later", not "before 
 - Expiry is documented and enforced server-side. Refresh is handled explicitly, never by silently extending a token.
 - Passwords are hashed with a slow, salted algorithm (argon2id or bcrypt). Never reversible encryption, never a fast hash.
 - No security by obscurity: an unlisted route is still a public route.
+- CORS: an explicit origin list from config, recorded in the auth ADR. Never `*` or a reflected `Origin` on anything that reads a cookie or `Authorization` header.
+- API keys issued to machine callers (once an ADR approves them) are stored hashed, scoped, expire (default 90 days at most), and can be revoked at once.
 
 **2. Secrets** — `skills/secrets-handling.md`
 - Read from environment or the secrets manager only. One source per secret, referenced by name, never copied into a second file.
 - Never in code, git history, logs, error messages, test fixtures, or any client-visible response.
 - `.env.example` lists names only, never values. `.env` is gitignored before the first commit.
-- Each secret has a documented rotation path (who rotates it, where, what restarts).
+- Each secret has a documented rotation path (who rotates it, where, what restarts), an expiry date, and a last-rotated date.
+- The full git history is scanned for secrets on setup and before the repo is made public or shared, not only staged changes.
 - If you are about to write something that looks like a key or token, stop and ask.
 
 **3. RBAC** — `skills/rbac.md`
@@ -147,6 +151,7 @@ Every backend gets all eight, from the first endpoint. Not "later", not "before 
 - What would alert, and on what threshold, is written in `docs/threat-model.md`. Wiring alerts or log shipping to an outside service needs an ADR.
 
 **Backend-shape extras** — applied on top of the eight, based on section 1:
+- **Every shape:** no check-then-write on shared state. One atomic statement, a row lock in a transaction, or a unique constraint, tested with parallel requests.
 - **Transactional:** idempotency keys on every write that moves money or stock; database transactions around multi-step writes; outbox pattern for side effects (emails, webhooks) that must not double-fire.
 - **Analytics / reporting:** read replica or cache for heavy reads; exports are rate limited and audit logged.
 - **Real-time:** authenticate the socket connection, re-check authorization per channel or room, rate limit messages.
@@ -195,6 +200,7 @@ Every backend gets all eight, from the first endpoint. Not "later", not "before 
 - [ ] No secret, token, or personal data in code, logs, fixtures, or responses
 - [ ] No empty catch, no stack trace or internal detail reaching the client
 - [ ] No entry point missing from the inventory in `docs/threat-model.md`; the inventory test passes
+- [ ] No CORS wildcard or reflected origin; no check-then-write on shared state
 
 Rules:
 - If you cannot describe how a task would be verified, it is not ready to implement. Ask instead.
