@@ -57,6 +57,18 @@ Last updated: <date> · Backend shape: <from AGENTS.md section 1>
 - <anything not closed by the spine>
 ```
 
+## Read-only mode
+
+When reviewing an existing backend (`review-mode.md`), build the same one-page model from the code, and change nothing.
+
+- **Data:** from the schema, migrations, and models. Classify each column group as personal, sensitive, or internal.
+- **Callers:** from the auth middleware, role definitions, API-key or service-auth code, and webhook handlers.
+- **Entry points:** from registered routes, webhook handlers, socket handlers, scheduled jobs, and upload endpoints. Use the recipe's inventory check if the stack has one. Note any entry point the code registers in more than one way.
+- **Trust boundaries:** from outbound HTTP calls, inbound webhooks, file storage, and the database connection.
+- **The four questions per entry point** become findings when the answer is yes, with `file:line` evidence.
+- **Worst case** is judgment: label it *guess*.
+- Write the model into the review report, not into `docs/threat-model.md`. If the repo already has one, compare the two and report every entry point that is in one but not the other.
+
 ## While building
 
 - Before writing an endpoint, find its row in the entry-point table. If it is missing, add it. The inventory test fails until you do.

@@ -56,4 +56,14 @@ A backend can be more than one. Name every shape that applies and which endpoint
 - Whether it was stated, obvious (and from which words), or answered by the human.
 - The extras now in force, one line each.
 
+## Read-only mode
+
+When reviewing an existing backend (`review-mode.md`), infer both axes from the code instead of asking, and change nothing.
+
+- **Data shape evidence:** tables and columns (money, stock, slots, balances point to transactional), payment or booking libraries, aggregate queries and export routes (analytics), websocket or subscription code (real-time).
+- **Traffic shape evidence:** open signup or not, routes reachable without auth, IP allowlists or SSO in front, deployment config in the repo.
+- For each axis, give the shape, the `file:line` evidence, and a confidence label (confirmed, inferred, guess).
+- Do not write into section 1 of the reviewed repo. The inferred shape goes into the report, and is the first open question for the human.
+- Then check the extras for that shape as findings: for example, a transactional shape with no idempotency key on a money write.
+
 `AGENTS.md` section 7 outranks this doc wherever they disagree.

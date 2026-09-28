@@ -173,6 +173,8 @@ Every backend gets all eight, from the first endpoint. Not "later", not "before 
 1. Run `skills/backend-shape.md`. If the data shape or traffic shape is not stated or obvious, ask the human one short question. Do not infer silently. Write the answer into section 1.
 2. Run `skills/threat-model.md`. Write `docs/threat-model.md`: what data this touches, who can reach each endpoint, the worst case if it is exposed. Refer back to it while building.
 
+**Reviewing existing code, with no changes asked for:** follow `skills/review-mode.md`. Change nothing in the repo, and report findings with `file:line` evidence, severity, and confidence.
+
 **Then, for anything that ships:**
 
 1. Restate the task in one sentence, naming whose outcome it serves.
@@ -225,6 +227,7 @@ The skills are plain markdown. Nothing loads automatically. Read the one the tas
 | New endpoint, webhook, upload, or query | `skills/input-validation.md` |
 | New public or expensive endpoint | `skills/rate-limit.md` |
 | New or removed route, health check, alerting, or "how would we know?" | `skills/observability.md` |
+| Reviewing or auditing an existing backend, or bringing beaverdam into existing code | `skills/review-mode.md` — change nothing, report findings |
 | A key leaked, an account looks compromised, suspicious log entries | `skills/incident-checklist.md` — stop building and tell the human first |
 
 Always read the matching section of `.beaverdam/recipes/<stack>.md` alongside the skill.

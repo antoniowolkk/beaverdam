@@ -57,6 +57,7 @@ Using junior-agent too? Use beaverdam's `AGENTS.md` as the project file instead 
 | `skills/input-validation.md` | Boundary validation. Flags raw request data in a query or write. |
 | `skills/rate-limit.md` | What needs limiting, and default thresholds. |
 | `skills/observability.md` | Endpoint inventory checked by a test, countable security signals, health checks, the alert list. |
+| `skills/review-mode.md` | Read-only review of an existing backend: findings with evidence, severity, and confidence. Changes nothing. |
 | `skills/incident-checklist.md` | Runbook, not a build rule: what to do when a key leaks or an account is compromised. |
 | `recipes/node-express.md` | Spine → Node/Express + Postgres code. |
 | `recipes/supabase.md` | Spine → Supabase RLS, policies, edge functions. |
