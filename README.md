@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/beaverdam.webp" alt="beaverdam: a beaver peeking out from behind a wooden shield" width="280">
+</p>
+
 # beaverdam
 
 The security spine for every backend an AI agent builds. A rule set that makes the agent scaffold auth, secrets handling, RBAC, input validation, rate limiting, structured audit logging, safe error handling, and security observability by default, in whatever stack the project runs, without you naming each one.
