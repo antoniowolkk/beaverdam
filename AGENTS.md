@@ -39,6 +39,8 @@ recipes/                    one file per stack: the spine as real code. Stack-sp
 examples/
   node-express-demo/        proof for recipes/node-express.md (pattern A)
   supabase-sql-check/       proof for the SQL in recipes/supabase.md
+docs/adr/                   this repo's own decisions (not the template's). 0001: publish from antoniowolkk
+assets/                     images the README uses
 README.md, LICENSE
 Beaverdam PRD.pdf           private, gitignored: only on the maintainer's machine
 AGENTS.md / CLAUDE.md       this file (CLAUDE.md is a symlink)
