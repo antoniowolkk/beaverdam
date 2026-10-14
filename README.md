@@ -20,7 +20,7 @@ A sibling to [junior-agent](https://github.com/antoniowolkk/junior-agent). junio
 
 Everything is plain markdown. No plugin format, no frontmatter. It reads the same in Claude Code, Cursor, Aider, and Codex CLI, since all of them read `AGENTS.md` natively.
 
-Copy it into any project:
+beaverdam is not a Claude Code plugin marketplace. Adding this repo through "Add marketplace" fails with "no manifest found at .claude-plugin/marketplace.json". That is expected. Copy the files into any project instead:
 
 ```bash
 cp -n beaverdam/templates/AGENTS.md ./AGENTS.md
